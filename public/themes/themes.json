@@ -1,0 +1,23 @@
+[
+  {
+    "value": "nova",
+    "name": "Nova",
+    "bgPrimary": "#050510",
+    "bgSecondary": "#0a0a1f",
+    "bgTertiary": "rgba(5, 5, 16, 0.92)",
+    "bgHover": "rgba(26, 26, 58, 0.95)",
+    "bgContainer": "rgba(5,5,20,0.75)",
+    "bgContainerGradient": "#050510, #0a0a1f",
+    "accent": "#a855f7",
+    "accentLight": "#c084fc",
+    "accentDark": "#7e22ce",
+    "border": "rgba(168, 85, 247, 0.4)",
+    "borderHover": "rgba(192, 132, 252, 0.9)",
+    "text": "#f5f3ff",
+    "textSecondary": "#ddd6fe",
+    "gradient": "linear-gradient(135deg, #a855f7 0%, #4c1d95 100%)",
+    "gradientLight": "linear-gradient(135deg, #c084fc 0%, #a855f7 100%)",
+    "shadow": "rgba(168, 85, 247, 0.5)",
+    "shadowHover": "rgba(168, 85, 247, 0.8)"
+  }
+]

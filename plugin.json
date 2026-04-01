@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/sys/plugin-schema.json",
+  "name": "projectnova",
+  "common_name": "Project Nova",
+  "description": "Add any game to your Steam library instantly, free and easy! Project Nova does it in one click.",
+  "version": "1.0",
+  "include": [
+    "public"
+  ]
+}
