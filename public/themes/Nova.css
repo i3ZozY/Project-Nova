@@ -1,0 +1,195 @@
+:root {
+    --lt-bg-primary: #050510;
+    --lt-bg-secondary: #0a0a1f;
+    --lt-bg-tertiary: rgba(5, 5, 16, 0.92);
+    --lt-bg-hover: rgba(26, 26, 58, 0.95);
+    --lt-bg-container: rgba(5,5,20,0.75);
+    --lt-bg-container-gradient: #050510, #0a0a1f;
+    
+    /* Nova core colours – vibrant purple with electric blue */
+    --lt-accent: #a855f7;
+    --lt-accent-light: #c084fc;
+    --lt-accent-dark: #7e22ce;
+    
+    /* Secondary glow colours */
+    --lt-accent-glow: rgba(168, 85, 247, 0.6);
+    --lt-accent-glow-strong: rgba(168, 85, 247, 0.9);
+    
+    --lt-border: rgba(168, 85, 247, 0.4);
+    --lt-border-hover: rgba(192, 132, 252, 0.9);
+    
+    --lt-text: #f5f3ff;
+    --lt-text-secondary: #ddd6fe;
+    
+    /* Gradient with explosive nova feel */
+    --lt-gradient: linear-gradient(135deg, #a855f7 0%, #4c1d95 100%);
+    --lt-gradient-light: linear-gradient(135deg, #c084fc 0%, #a855f7 100%);
+    
+    --lt-shadow: rgba(168, 85, 247, 0.5);
+    --lt-shadow-hover: rgba(168, 85, 247, 0.8);
+    --lt-shadow-rgba: rgba(168, 85, 247, 0.3);
+    --lt-rgb: 168, 85, 247;
+}
+
+/* Optional: animated starfield background for overlays */
+@keyframes starMove {
+    0% { background-position: 0 0; }
+    100% { background-position: 1000px 1000px; }
+}
+
+/* Add starry noise effect to main overlay backgrounds (optional) */
+.projectnova-overlay,
+.projectnova-settings-overlay,
+.projectnova-fixes-results-overlay,
+.projectnova-settings-manager-overlay {
+    background: radial-gradient(circle at 20% 30%, rgba(5,5,20,0.95), rgba(2,2,10,0.98)) !important;
+    backdrop-filter: blur(12px) !important;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Starfield overlay (light dots) – add after backdrop */
+.projectnova-overlay::before,
+.projectnova-settings-overlay::before,
+.projectnova-fixes-results-overlay::before,
+.projectnova-settings-manager-overlay::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: radial-gradient(2px 2px at 15% 30%, rgba(255,255,255,0.3), rgba(0,0,0,0)),
+                      radial-gradient(3px 3px at 75% 60%, rgba(255,255,255,0.2), rgba(0,0,0,0)),
+                      radial-gradient(1px 1px at 40% 80%, rgba(255,255,255,0.4), rgba(0,0,0,0));
+    background-size: 200px 200px, 300px 300px, 150px 150px;
+    background-repeat: repeat;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.4;
+    animation: starMove 120s linear infinite;
+}
+
+/* Ensure modal content is above starfield */
+.projectnova-overlay > div,
+.projectnova-settings-overlay > div,
+.projectnova-fixes-results-overlay > div,
+.projectnova-settings-manager-overlay > div {
+    position: relative;
+    z-index: 1;
+}
+
+/* ---- Nova Glow effects on focus & hover ---- */
+button.active-focus,
+a.active-focus,
+.projectnova-btn:hover:not([data-disabled="1"]),
+.projectnova-btn.primary:hover:not([data-disabled="1"]) {
+    box-shadow: 0 0 15px var(--lt-accent-glow), 0 0 5px var(--lt-accent-light) !important;
+    transition: all 0.2s ease-out;
+}
+
+/* Pulse animation for active focus (optional) */
+@keyframes novaPulse {
+    0% { box-shadow: 0 0 0 0 var(--lt-accent-glow); }
+    70% { box-shadow: 0 0 0 10px rgba(168, 85, 247, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0); }
+}
+
+.active-focus {
+    animation: novaPulse 1.2s infinite !important;
+    outline: 2px solid var(--lt-accent-light) !important;
+    outline-offset: 2px;
+}
+
+/* ---- Custom scrollbar for modals (modern look) ---- */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--lt-bg-primary);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--lt-accent);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--lt-accent-light);
+}
+
+/* ---- Select dropdown enhancement (keep your rules but upgrade) ---- */
+select {
+    background-color: var(--lt-bg-tertiary) !important;
+    color: var(--lt-text) !important;
+    border: 1px solid var(--lt-border) !important;
+    border-radius: 6px !important;
+    padding: 8px 12px !important;
+    transition: all 0.2s;
+}
+select:hover {
+    border-color: var(--lt-border-hover) !important;
+    box-shadow: 0 0 6px var(--lt-accent-glow);
+}
+select:focus {
+    outline: none !important;
+    border-color: var(--lt-accent) !important;
+    box-shadow: 0 0 12px var(--lt-accent-glow-strong) !important;
+}
+select option {
+    background-color: var(--lt-bg-secondary);
+    color: var(--lt-text);
+}
+select option:checked {
+    background: linear-gradient(var(--lt-accent), var(--lt-accent-dark));
+    color: #fff !important;
+}
+
+/* ---- Buttons with explosive hover effect ---- */
+.projectnova-btn {
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s;
+}
+.projectnova-btn:hover:not([data-disabled="1"]) {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 10px 20px rgba(0,0,0,0.4), 0 0 15px var(--lt-accent-glow);
+}
+.projectnova-btn.primary {
+    background: linear-gradient(95deg, var(--lt-accent), var(--lt-accent-dark));
+    border: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.projectnova-btn.primary:hover:not([data-disabled="1"]) {
+    background: linear-gradient(95deg, var(--lt-accent-light), var(--lt-accent));
+    transform: translateY(-4px) scale(1.03);
+    box-shadow: 0 12px 25px rgba(0,0,0,0.4), 0 0 20px var(--lt-accent-glow);
+}
+
+/* ---- Add subtle border glow to cards and containers ---- */
+.projectnova-fixes-results-overlay .projectnova-btn,
+.projectnova-settings-manager-overlay .projectnova-btn {
+    transition: all 0.25s ease;
+}
+.projectnova-fixes-results-overlay .projectnova-btn:active,
+.projectnova-settings-manager-overlay .projectnova-btn:active {
+    transform: scale(0.98);
+}
+
+/* ---- Nova header gradient text effect (optional) ---- */
+.projectnova-title,
+.projectnova-settings-overlay [style*="font-size:24px"]:first-child,
+.projectnova-settings-manager-overlay [style*="font-size:24px"]:first-child {
+    background: linear-gradient(135deg, #f0f0ff, var(--lt-accent-light));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 2px 10px rgba(168,85,247,0.3);
+}
+
+/* ---- API list item styling (if present) ---- */
+.projectnova-api-item {
+    transition: all 0.2s;
+}
+.projectnova-api-item:hover {
+    transform: translateX(5px);
+    border-color: var(--lt-accent) !important;
+}

@@ -2,7 +2,9 @@ import json
 import os
 import shutil
 import sys
+import threading
 import webbrowser
+import subprocess
 
 from typing import Any
 
@@ -61,7 +63,111 @@ from steam_utils import detect_steam_install_path, get_game_install_path_respons
 logger = shared_logger
 
 
-def GetPluginDir() -> str:  # Legacy API used by the frontend
+# ========================== Manifest Updater State & Functions ==========================
+MANIFEST_UPDATER_STATE = {
+    "status": "idle",  # idle, running, done, error
+    "output": "",
+    "error": None,
+    "appid": None
+}
+MANIFEST_UPDATER_LOCK = threading.Lock()
+
+
+def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", manifesthubKey="", **kwargs):
+    """
+    Called from frontend to start the manifest updater.
+    Accepts keyword arguments: appid, mode, morrenusKey, manifesthubKey.
+    """
+    # Also handle legacy call where args are passed as a dict
+    if appid is None and kwargs.get('args'):
+        args = kwargs['args']
+        if isinstance(args, dict):
+            appid = args.get('appid')
+            mode = args.get('mode', 'github')
+            morrenusKey = args.get('morrenusKey', '')
+            manifesthubKey = args.get('manifesthubKey', '')
+    
+    if not appid or not str(appid).isdigit():
+        logger.error(f"Invalid AppID: {appid}")
+        return json.dumps({"success": False, "error": "Valid numeric App ID required"})
+    
+    # Reset state
+    with MANIFEST_UPDATER_LOCK:
+        MANIFEST_UPDATER_STATE["status"] = "running"
+        MANIFEST_UPDATER_STATE["output"] = ""
+        MANIFEST_UPDATER_STATE["error"] = None
+        MANIFEST_UPDATER_STATE["appid"] = appid
+
+    def run_script():
+        plugin_root = get_plugin_dir()
+        script_path = os.path.join(plugin_root, "manifests.ps1")
+        if not os.path.exists(script_path):
+            with MANIFEST_UPDATER_LOCK:
+                MANIFEST_UPDATER_STATE["status"] = "error"
+                MANIFEST_UPDATER_STATE["error"] = "manifests.ps1 not found in plugin root"
+            return
+
+        # Build command
+        cmd = [
+            "powershell.exe",
+            "-ExecutionPolicy", "Bypass",
+            "-File", script_path,
+            "-AppId", str(appid),
+            "-Mode", mode
+        ]
+        if morrenusKey:
+            cmd += ["-MorrenusApiKey", morrenusKey]
+        if manifesthubKey:
+            cmd += ["-ManifestHubApiKey", manifesthubKey]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            output_lines = []
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    output_lines.append(line)
+                    with MANIFEST_UPDATER_LOCK:
+                        MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-50:])
+            process.wait()
+            if process.returncode == 0:
+                with MANIFEST_UPDATER_LOCK:
+                    MANIFEST_UPDATER_STATE["status"] = "done"
+                    MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
+            else:
+                with MANIFEST_UPDATER_LOCK:
+                    MANIFEST_UPDATER_STATE["status"] = "error"
+                    MANIFEST_UPDATER_STATE["error"] = f"Script exited with code {process.returncode}"
+                    MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
+        except Exception as e:
+            with MANIFEST_UPDATER_LOCK:
+                MANIFEST_UPDATER_STATE["status"] = "error"
+                MANIFEST_UPDATER_STATE["error"] = str(e)
+
+    threading.Thread(target=run_script, daemon=True).start()
+    return json.dumps({"success": True, "message": "Manifest updater started"})
+
+
+def get_manifest_updater_status(**kwargs):
+    """Return current status for frontend polling."""
+    with MANIFEST_UPDATER_LOCK:
+        return json.dumps({
+            "success": True,
+            "status": MANIFEST_UPDATER_STATE["status"],
+            "output": MANIFEST_UPDATER_STATE["output"],
+            "error": MANIFEST_UPDATER_STATE["error"],
+            "appid": MANIFEST_UPDATER_STATE["appid"]
+        })
+
+
+# ========================== Original Backend Functions ==========================
+def GetPluginDir() -> str:
     return get_plugin_dir()
 
 
@@ -277,7 +383,6 @@ def GetSettingsConfig(contentScriptQuery: str = "") -> str:
 
 
 def GetThemes(contentScriptQuery: str = "") -> str:
-    """Return the full themes palette list for the frontend."""
     try:
         themes_path = os.path.join(get_plugin_dir(), 'public', 'themes', 'themes.json')
         if os.path.exists(themes_path):
@@ -322,7 +427,6 @@ def ApplySettingsChanges(
                 logger.warn("Project Nova: Failed to parse changes string payload")
                 return json.dumps({"success": False, "error": "Invalid JSON payload"})
             else:
-                # When a full payload dict was sent as JSON, unwrap keys we expect.
                 if isinstance(payload, dict) and "changes" in payload:
                     payload = payload.get("changes")
                 elif isinstance(payload, dict) and "changesJson" in payload and isinstance(payload["changesJson"], str):
@@ -332,7 +436,6 @@ def ApplySettingsChanges(
                         logger.warn("Project Nova: Failed to parse changesJson string inside payload")
                         return json.dumps({"success": False, "error": "Invalid JSON payload"})
         elif isinstance(changes, dict) and changes:
-            # When the bridge passes a dict argument directly.
             if "changesJson" in changes and isinstance(changes["changesJson"], str):
                 try:
                     payload = json.loads(changes["changesJson"])
@@ -344,7 +447,6 @@ def ApplySettingsChanges(
             else:
                 payload = changes
         else:
-            # Look for JSON payload inside kwargs.
             changes_json = kwargs.get("changesJson")
             if isinstance(changes_json, dict):
                 payload = changes_json
@@ -406,18 +508,15 @@ def GetTranslations(contentScriptQuery: str = "", language: str = "", **kwargs: 
 
 
 def GetAvailableThemes(contentScriptQuery: str = "") -> str:
-    """Return list of available theme CSS files."""
     try:
         themes_dir = os.path.join(get_plugin_dir(), "public", "themes")
         themes = []
         if os.path.exists(themes_dir):
             for filename in os.listdir(themes_dir):
                 if filename.endswith(".css"):
-                    theme_name = filename[:-4]  # Remove .css extension
-                    # Capitalize first letter for display
+                    theme_name = filename[:-4]
                     display_name = theme_name.capitalize()
                     themes.append({"value": theme_name, "label": display_name})
-        # Sort themes, but put 'original' first
         themes.sort(key=lambda x: (x["value"] != "original", x["label"]))
         return json.dumps({"success": True, "themes": themes})
     except Exception as exc:
@@ -425,6 +524,7 @@ def GetAvailableThemes(contentScriptQuery: str = "") -> str:
         return json.dumps({"success": False, "error": str(exc), "themes": []})
 
 
+# ========================== Plugin Lifecycle ==========================
 class Plugin:
     def _front_end_loaded(self):
         _copy_webkit_files()

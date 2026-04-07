@@ -15,15 +15,9 @@ from http_client import ensure_http_client
 from logger import logger
 from utils import ensure_temp_download_dir
 from steam_utils import get_game_install_path_response
-
-FIX_DOWNLOAD_STATE: Dict[int, Dict[str, Any]] = {}
-FIX_DOWNLOAD_LOCK = threading.Lock()
-UNFIX_STATE: Dict[int, Dict[str, Any]] = {}
-UNFIX_LOCK = threading.Lock()
+from state_utils import set_fix_download_state, get_fix_download_state, set_unfix_state, get_unfix_state
 
 # ── Fixes index cache (avoids HEAD requests to R2) ──────────────────────
-# Note: This index is maintained by the original LuaTools project.
-# If you want to host your own index, change this URL.
 FIXES_INDEX_URL = "https://index.luatools.work/fixes-index.json"
 _fixes_index_lock = threading.Lock()
 _fixes_index_cache: Optional[Dict] = None
@@ -40,7 +34,6 @@ def _fetch_fixes_index() -> Optional[Dict]:
         if _fixes_index_cache is not None and (now - _fixes_index_fetched_at) < _FIXES_INDEX_TTL:
             return _fixes_index_cache
 
-    # Fetch outside the lock to avoid blocking other threads
     try:
         client = ensure_http_client("Project Nova: FixesIndex")
         resp = client.get(FIXES_INDEX_URL, follow_redirects=True, timeout=10)
@@ -59,7 +52,6 @@ def _fetch_fixes_index() -> Optional[Dict]:
     except Exception as exc:
         logger.warn(f"Project Nova: Failed to fetch fixes index: {exc}")
 
-    # Return stale cache if available
     with _fixes_index_lock:
         return _fixes_index_cache
 
@@ -69,30 +61,6 @@ def _is_safe_path(base_path: str, target_path: str) -> bool:
     abs_base = os.path.abspath(base_path)
     abs_target = os.path.abspath(os.path.join(base_path, target_path))
     return abs_target.startswith(abs_base + os.sep) or abs_target == abs_base
-
-
-def _set_fix_download_state(appid: int, update: dict) -> None:
-    with FIX_DOWNLOAD_LOCK:
-        state = FIX_DOWNLOAD_STATE.get(appid) or {}
-        state.update(update)
-        FIX_DOWNLOAD_STATE[appid] = state
-
-
-def _get_fix_download_state(appid: int) -> dict:
-    with FIX_DOWNLOAD_LOCK:
-        return FIX_DOWNLOAD_STATE.get(appid, {}).copy()
-
-
-def _set_unfix_state(appid: int, update: dict) -> None:
-    with UNFIX_LOCK:
-        state = UNFIX_STATE.get(appid) or {}
-        state.update(update)
-        UNFIX_STATE[appid] = state
-
-
-def _get_unfix_state(appid: int) -> dict:
-    with UNFIX_LOCK:
-        return UNFIX_STATE.get(appid, {}).copy()
 
 
 def check_for_fixes(appid: int) -> str:
@@ -115,7 +83,6 @@ def check_for_fixes(appid: int) -> str:
         logger.warn(f"Project Nova: Failed to fetch game name for {appid}: {exc}")
         result["gameName"] = f"Unknown Game ({appid})"
 
-    # Use the cached fixes index instead of HEAD requests to R2
     index = _fetch_fixes_index()
     if index is not None:
         generic_url = f"https://files.luatools.work/GameBypasses/{appid}.zip"
@@ -137,7 +104,6 @@ def check_for_fixes(appid: int) -> str:
 
         logger.log(f"Project Nova: Fix check for {appid} via index: generic={appid in index['generic']}, online={appid in index['online']}")
     else:
-        # Fallback: HEAD requests if index is unavailable
         logger.warn(f"Project Nova: Fixes index unavailable, falling back to HEAD requests for {appid}")
         client = ensure_http_client("Project Nova: CheckForFixes")
         try:
@@ -168,33 +134,42 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
     try:
         dest_root = ensure_temp_download_dir()
         dest_zip = os.path.join(dest_root, f"fix_{appid}.zip")
-        _set_fix_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": 0, "error": None})
+        set_fix_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": 0, "error": None})
 
         logger.log(f"Project Nova: Downloading {fix_type} from {download_url}")
 
-        with client.stream("GET", download_url, follow_redirects=True, timeout=30) as resp:
-            logger.log(f"Project Nova: Fix download response for {appid}: status={resp.status_code}")
-            resp.raise_for_status()
-            total = int(resp.headers.get("Content-Length", "0") or "0")
-            _set_fix_download_state(appid, {"totalBytes": total})
+        # Retry up to 2 times for timeouts
+        for attempt in range(2):
+            try:
+                with client.stream("GET", download_url, follow_redirects=True, timeout=30) as resp:
+                    logger.log(f"Project Nova: Fix download response for {appid}: status={resp.status_code}")
+                    resp.raise_for_status()
+                    total = int(resp.headers.get("Content-Length", "0") or "0")
+                    set_fix_download_state(appid, {"totalBytes": total})
 
-            with open(dest_zip, "wb") as output:
-                for chunk in resp.iter_bytes():
-                    if not chunk:
-                        continue
-                    state = _get_fix_download_state(appid)
-                    if state.get("status") == "cancelled":
-                        logger.log(f"Project Nova: Fix download cancelled before writing chunk for {appid}")
-                        raise RuntimeError("cancelled")
-                    output.write(chunk)
-                    read = int(state.get("bytesRead", 0)) + len(chunk)
-                    _set_fix_download_state(appid, {"bytesRead": read})
-                    if _get_fix_download_state(appid).get("status") == "cancelled":
-                        logger.log(f"Project Nova: Fix download cancelled for {appid}")
-                        raise RuntimeError("cancelled")
+                    with open(dest_zip, "wb") as output:
+                        for chunk in resp.iter_bytes():
+                            if not chunk:
+                                continue
+                            state = get_fix_download_state(appid)
+                            if state.get("status") == "cancelled":
+                                logger.log(f"Project Nova: Fix download cancelled before writing chunk for {appid}")
+                                raise RuntimeError("cancelled")
+                            output.write(chunk)
+                            read = int(state.get("bytesRead", 0)) + len(chunk)
+                            set_fix_download_state(appid, {"bytesRead": read})
+                            if get_fix_download_state(appid).get("status") == "cancelled":
+                                logger.log(f"Project Nova: Fix download cancelled for {appid}")
+                                raise RuntimeError("cancelled")
+                break  # success, exit retry loop
+            except (httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout) as timeout_err:
+                logger.warn(f"Project Nova: Fix download timeout (attempt {attempt+1}/2): {timeout_err}")
+                if attempt == 1:
+                    raise
+                continue
 
         logger.log(f"Project Nova: Download complete, extracting to {install_path}")
-        _set_fix_download_state(appid, {"status": "extracting"})
+        set_fix_download_state(appid, {"status": "extracting"})
 
         extracted_files = []
         with zipfile.ZipFile(dest_zip, "r") as archive:
@@ -206,7 +181,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                 parts = name.split("/")
                 if parts[0]:
                     top_level_entries.add(parts[0])
-            if _get_fix_download_state(appid).get("status") == "cancelled":
+            if get_fix_download_state(appid).get("status") == "cancelled":
                 logger.log(f"Project Nova: Fix extraction cancelled before start for {appid}")
                 raise RuntimeError("cancelled")
 
@@ -217,7 +192,6 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                         target_path = member[len(appid_folder):]
                         if not target_path:
                             continue
-                        # Validate path doesn't escape install directory (prevent path traversal)
                         if not _is_safe_path(install_path, target_path):
                             logger.warn(f"Project Nova: Skipping potentially unsafe path in zip: {member}")
                             continue
@@ -229,7 +203,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                                 output.write(source.read())
                             extracted_files.append(target_path.replace("\\", "/"))
                         source.close()
-                        if _get_fix_download_state(appid).get("status") == "cancelled":
+                        if get_fix_download_state(appid).get("status") == "cancelled":
                             logger.log(f"Project Nova: Fix extraction cancelled mid-process for {appid}")
                             raise RuntimeError("cancelled")
             else:
@@ -237,17 +211,16 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                 for member in archive.namelist():
                     if member.endswith("/"):
                         continue
-                    # Validate path doesn't escape install directory (prevent path traversal)
                     if not _is_safe_path(install_path, member):
                         logger.warn(f"Project Nova: Skipping potentially unsafe path in zip: {member}")
                         continue
                     archive.extract(member, install_path)
                     extracted_files.append(member.replace("\\", "/"))
-                    if _get_fix_download_state(appid).get("status") == "cancelled":
+                    if get_fix_download_state(appid).get("status") == "cancelled":
                         logger.log(f"Project Nova: Fix extraction cancelled mid-process for {appid}")
                         raise RuntimeError("cancelled")
 
-        if _get_fix_download_state(appid).get("status") == "cancelled":
+        if get_fix_download_state(appid).get("status") == "cancelled":
             logger.log(f"Project Nova: Fix cancelled after extraction for {appid}")
             raise RuntimeError("cancelled")
 
@@ -280,7 +253,6 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
 
         log_file_path = os.path.join(install_path, f"projectnova-fix-log-{appid}.log")
         try:
-            # Read existing log to preserve previous fixes
             existing_content = ""
             if os.path.exists(log_file_path):
                 try:
@@ -289,16 +261,13 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                 except Exception:
                     pass
 
-            # Append new fix entry
             with open(log_file_path, "w", encoding="utf-8") as log_file:
-                # Write existing content first
                 if existing_content:
                     log_file.write(existing_content)
                     if not existing_content.endswith("\n"):
                         log_file.write("\n")
-                    log_file.write("\n---\n\n")  # Separator between fixes
+                    log_file.write("\n---\n\n")
 
-                # Write new fix entry
                 log_file.write(f'[FIX]\n')
                 log_file.write(f'Date: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
                 log_file.write(f'Game: {game_name or f"Unknown Game ({appid})"}\n')
@@ -314,7 +283,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
             logger.warn(f"Project Nova: Failed to create fix log file: {exc}")
 
         logger.log(f"Project Nova: {fix_type} applied successfully to {install_path}")
-        _set_fix_download_state(appid, {"status": "done", "success": True})
+        set_fix_download_state(appid, {"status": "done", "success": True})
 
         try:
             os.remove(dest_zip)
@@ -328,10 +297,10 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                     os.remove(dest_zip)
             except Exception:
                 pass
-            _set_fix_download_state(appid, {"status": "cancelled", "success": False, "error": "Cancelled by user"})
+            set_fix_download_state(appid, {"status": "cancelled", "success": False, "error": "Cancelled by user"})
             return
         logger.warn(f"Project Nova: Failed to apply fix: {exc}")
-        _set_fix_download_state(appid, {"status": "failed", "error": str(exc)})
+        set_fix_download_state(appid, {"status": "failed", "error": str(exc)})
 
 
 def apply_game_fix(appid: int, download_url: str, install_path: str, fix_type: str = "", game_name: str = "") -> str:
@@ -348,7 +317,7 @@ def apply_game_fix(appid: int, download_url: str, install_path: str, fix_type: s
 
     logger.log(f"Project Nova: ApplyGameFix appid={appid}, fixType={fix_type}")
 
-    _set_fix_download_state(appid, {"status": "queued", "bytesRead": 0, "totalBytes": 0, "error": None})
+    set_fix_download_state(appid, {"status": "queued", "bytesRead": 0, "totalBytes": 0, "error": None})
     thread = threading.Thread(
         target=_download_and_extract_fix, args=(appid, download_url, install_path, fix_type, game_name), daemon=True
     )
@@ -363,7 +332,7 @@ def get_apply_fix_status(appid: int) -> str:
     except Exception:
         return json.dumps({"success": False, "error": "Invalid appid"})
 
-    state = _get_fix_download_state(appid)
+    state = get_fix_download_state(appid)
     return json.dumps({"success": True, "state": state})
 
 
@@ -373,11 +342,11 @@ def cancel_apply_fix(appid: int) -> str:
     except Exception:
         return json.dumps({"success": False, "error": "Invalid appid"})
 
-    state = _get_fix_download_state(appid)
+    state = get_fix_download_state(appid)
     if not state or state.get("status") in {"done", "failed"}:
         return json.dumps({"success": True, "message": "Nothing to cancel"})
 
-    _set_fix_download_state(appid, {"status": "cancelled", "success": False, "error": "Cancelled by user"})
+    set_fix_download_state(appid, {"status": "cancelled", "success": False, "error": "Cancelled by user"})
     logger.log(f"Project Nova: CancelApplyFix requested for appid={appid}")
     return json.dumps({"success": True})
 
@@ -388,21 +357,19 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
         log_file_path = os.path.join(install_path, f"projectnova-fix-log-{appid}.log")
 
         if not os.path.exists(log_file_path):
-            _set_unfix_state(appid, {"status": "failed", "error": "No fix log found. Cannot un-fix."})
+            set_unfix_state(appid, {"status": "failed", "error": "No fix log found. Cannot un-fix."})
             return
 
-        _set_unfix_state(appid, {"status": "removing", "progress": "Reading log file..."})
+        set_unfix_state(appid, {"status": "removing", "progress": "Reading log file..."})
 
-        files_to_delete = set()  # Use set to avoid duplicates
-        remaining_fixes = []  # Fixes to keep in the log
+        files_to_delete = set()
+        remaining_fixes = []
 
         try:
             with open(log_file_path, "r", encoding="utf-8") as handle:
                 log_content = handle.read()
 
-            # Parse multiple fixes (new format with [FIX] markers)
             if "[FIX]" in log_content:
-                # New format with multiple fixes
                 fix_blocks = log_content.split("[FIX]")
                 for block in fix_blocks:
                     if not block.strip():
@@ -411,7 +378,7 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
                     lines = block.split("\n")
                     in_files_section = False
                     block_date = None
-                    block_lines = []  # Store original block content
+                    block_lines = []
 
                     for line in lines:
                         line_stripped = line.strip()
@@ -425,16 +392,12 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
                         if line_stripped == "Files:":
                             in_files_section = True
                         elif in_files_section and line_stripped:
-                            # If we're deleting a specific fix, only add files from that fix
                             if fix_date is None or (block_date and block_date == fix_date):
                                 files_to_delete.add(line_stripped)
 
-                    # If we're deleting a specific fix, keep the others
                     if fix_date is not None and block_date and block_date != fix_date:
                         remaining_fixes.append("[FIX]\n" + "\n".join(block_lines) + "\n[/FIX]")
             else:
-                # Old format (single fix without markers) - legacy support
-                # Delete all files (no individual selection possible)
                 lines = log_content.split("\n")
                 in_files_section = False
                 for line in lines:
@@ -447,10 +410,10 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
             logger.log(f"Project Nova: Found {len(files_to_delete)} unique files to remove from log")
         except Exception as exc:
             logger.warn(f"Project Nova: Failed to read log file: {exc}")
-            _set_unfix_state(appid, {"status": "failed", "error": f"Failed to read log file: {str(exc)}"})
+            set_unfix_state(appid, {"status": "failed", "error": f"Failed to read log file: {str(exc)}"})
             return
 
-        _set_unfix_state(appid, {"status": "removing", "progress": f"Removing {len(files_to_delete)} files..."})
+        set_unfix_state(appid, {"status": "removing", "progress": f"Removing {len(files_to_delete)} files..."})
         deleted_count = 0
         for file_path in files_to_delete:
             try:
@@ -464,9 +427,7 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
 
         logger.log(f"Project Nova: Deleted {deleted_count}/{len(files_to_delete)} files")
 
-        # Update or delete the log file
         if remaining_fixes:
-            # We deleted a specific fix, update the log with remaining fixes
             try:
                 with open(log_file_path, "w", encoding="utf-8") as handle:
                     handle.write("\n\n---\n\n".join(remaining_fixes))
@@ -474,18 +435,17 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
             except Exception as exc:
                 logger.warn(f"Project Nova: Failed to update log file: {exc}")
         else:
-            # No fixes remaining, delete the log file
             try:
                 os.remove(log_file_path)
                 logger.log(f"Project Nova: Deleted log file {log_file_path}")
             except Exception as exc:
                 logger.warn(f"Project Nova: Failed to delete log file: {exc}")
 
-        _set_unfix_state(appid, {"status": "done", "success": True, "filesRemoved": deleted_count})
+        set_unfix_state(appid, {"status": "done", "success": True, "filesRemoved": deleted_count})
 
     except Exception as exc:
         logger.warn(f"Project Nova: Un-fix failed: {exc}")
-        _set_unfix_state(appid, {"status": "failed", "error": str(exc)})
+        set_unfix_state(appid, {"status": "failed", "error": str(exc)})
 
 
 def unfix_game(appid: int, install_path: str = "", fix_date: str = "") -> str:
@@ -509,7 +469,7 @@ def unfix_game(appid: int, install_path: str = "", fix_date: str = "") -> str:
 
     logger.log(f"Project Nova: UnFixGame appid={appid}, path={resolved_path}, fix_date={fix_date}")
 
-    _set_unfix_state(appid, {"status": "queued", "progress": "", "error": None})
+    set_unfix_state(appid, {"status": "queued", "progress": "", "error": None})
     thread = threading.Thread(target=_unfix_game_worker, args=(appid, resolved_path, fix_date or None), daemon=True)
     thread.start()
 
@@ -522,7 +482,7 @@ def get_unfix_status(appid: int) -> str:
     except Exception:
         return json.dumps({"success": False, "error": "Invalid appid"})
 
-    state = _get_unfix_state(appid)
+    state = get_unfix_state(appid)
     return json.dumps({"success": True, "state": state})
 
 
@@ -564,20 +524,17 @@ def get_installed_fixes() -> str:
             if not os.path.exists(steamapps_path):
                 continue
 
-            # Get all appmanifest files
             try:
                 for filename in os.listdir(steamapps_path):
                     if not filename.startswith("appmanifest_") or not filename.endswith(".acf"):
                         continue
 
-                    # Extract appid from filename
                     try:
                         appid_str = filename.replace("appmanifest_", "").replace(".acf", "")
                         appid = int(appid_str)
                     except Exception:
                         continue
 
-                    # Parse manifest to get install directory
                     manifest_path = os.path.join(steamapps_path, filename)
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as handle:
@@ -594,24 +551,19 @@ def get_installed_fixes() -> str:
                         if not os.path.exists(full_install_path):
                             continue
 
-                        # Check for Project Nova fix log
                         log_file_path = os.path.join(full_install_path, f"projectnova-fix-log-{appid}.log")
                         if os.path.exists(log_file_path):
-                            # Parse the log file to get fix info (supports multiple fixes)
                             try:
                                 with open(log_file_path, "r", encoding="utf-8") as log_handle:
                                     log_content = log_handle.read()
 
-                                # Parse multiple fixes (new format with [FIX] markers)
                                 fixes_in_log = []
                                 if "[FIX]" in log_content:
-                                    # New format with multiple fixes
                                     fix_blocks = log_content.split("[FIX]")
                                     for block in fix_blocks:
                                         if not block.strip():
                                             continue
 
-                                        # Extract data from this fix block
                                         fix_data = {
                                             "appid": appid,
                                             "gameName": game_name,
@@ -646,10 +598,9 @@ def get_installed_fixes() -> str:
                                                 fix_data["files"].append(line)
 
                                         fix_data["filesCount"] = len(fix_data["files"])
-                                        if fix_data["date"]:  # Only add if it has a date (valid fix)
+                                        if fix_data["date"]:
                                             fixes_in_log.append(fix_data)
                                 else:
-                                    # Old format (single fix without markers) - legacy support
                                     log_lines = log_content.split("\n")
                                     fix_data = {
                                         "appid": appid,
@@ -684,23 +635,18 @@ def get_installed_fixes() -> str:
                                     if fix_data["date"]:
                                         fixes_in_log.append(fix_data)
 
-                                # Add all fixes found for this game
                                 for fix in fixes_in_log:
                                     installed_fixes.append(fix)
-
                             except Exception as exc:
                                 logger.warn(f"Project Nova: Failed to parse fix log for {appid}: {exc}")
-
                     except Exception as exc:
                         logger.warn(f"Project Nova: Failed to process manifest {filename}: {exc}")
                         continue
-
             except Exception as exc:
                 logger.warn(f"Project Nova: Failed to scan library {lib_path}: {exc}")
                 continue
 
         return json.dumps({"success": True, "fixes": installed_fixes})
-
     except Exception as exc:
         logger.warn(f"Project Nova: Failed to get installed fixes: {exc}")
         return json.dumps({"success": False, "error": str(exc)})

@@ -29,9 +29,7 @@ from logger import logger
 from paths import backend_path, public_path
 from steam_utils import detect_steam_install_path, has_lua_for_app
 from utils import count_apis, ensure_temp_download_dir, normalize_manifest_text, read_text, write_text
-
-DOWNLOAD_STATE: Dict[int, Dict[str, Any]] = {}
-DOWNLOAD_LOCK = threading.Lock()
+from state_utils import set_download_state, get_download_state
 
 # Cache for app names to avoid repeated API calls
 APP_NAME_CACHE: Dict[int, str] = {}
@@ -52,22 +50,10 @@ APPLIST_DOWNLOAD_TIMEOUT = 300  # 5 minutes for large file
 GAMES_DB_FILE_NAME = "games.json"
 GAMES_DB_URL = "https://toolsdb.piqseu.cc/games.json"
 
-# In-memory games database cache and lock (defined to avoid undefined variable)
+# In-memory games database cache and lock
 GAMES_DB_DATA: Dict[int, Any] = {}
 GAMES_DB_LOADED = False
 GAMES_DB_LOCK = threading.Lock()
-
-
-def _set_download_state(appid: int, update: dict) -> None:
-    with DOWNLOAD_LOCK:
-        state = DOWNLOAD_STATE.get(appid) or {}
-        state.update(update)
-        DOWNLOAD_STATE[appid] = state
-
-
-def _get_download_state(appid: int) -> dict:
-    with DOWNLOAD_LOCK:
-        return DOWNLOAD_STATE.get(appid, {}).copy()
 
 
 def _loaded_apps_path() -> str:
@@ -79,36 +65,26 @@ def _appid_log_path() -> str:
 
 
 def _fetch_app_name(appid: int) -> str:
-    """Fetch app name with rate limiting and caching.
-    
-    Fallback order:
-    1. In-memory cache
-    2. Applist file (in-memory) - checked before web requests
-    3. Steam API (web request as final resort)
-    """
+    """Fetch app name with rate limiting and caching."""
     global LAST_API_CALL_TIME
 
-    # Check cache first
     with APP_NAME_CACHE_LOCK:
         if appid in APP_NAME_CACHE:
             cached = APP_NAME_CACHE[appid]
-            if cached:  # Only return if not empty
+            if cached:
                 return cached
 
     # Check applist file before making web requests
     applist_name = _get_app_name_from_applist(appid)
     if applist_name:
-        # Cache the result from applist
         with APP_NAME_CACHE_LOCK:
             APP_NAME_CACHE[appid] = applist_name
         return applist_name
 
     # Steam API as final resort (web request)
-    # Rate limiting: calculate wait time and update timestamp atomically
     with APP_NAME_CACHE_LOCK:
         time_since_last_call = time.time() - LAST_API_CALL_TIME
         sleep_time = API_CALL_MIN_INTERVAL - time_since_last_call if time_since_last_call < API_CALL_MIN_INTERVAL else 0
-        # Update timestamp now to reserve this slot (prevents race condition)
         LAST_API_CALL_TIME = time.time() + sleep_time
 
     if sleep_time > 0:
@@ -128,14 +104,12 @@ def _fetch_app_name(appid: int) -> str:
             name = inner.get("name")
             if isinstance(name, str) and name.strip():
                 name = name.strip()
-                # Cache the result
                 with APP_NAME_CACHE_LOCK:
                     APP_NAME_CACHE[appid] = name
                 return name
     except Exception as exc:
         logger.warn(f"Project Nova: _fetch_app_name failed for {appid}: {exc}")
 
-    # Cache empty result to avoid repeated failed attempts
     with APP_NAME_CACHE_LOCK:
         APP_NAME_CACHE[appid] = ""
     return ""
@@ -185,34 +159,23 @@ def _log_appid_event(action: str, appid: int, name: str) -> None:
 
 def _preload_app_names_cache() -> None:
     """Pre-load all app names from loaded_apps, appidlogs, and applist files into memory cache."""
-    # First, load from appidlogs.txt (historical records)
+    # Load from appidlogs.txt
     try:
         log_path = _appid_log_path()
         if os.path.exists(log_path):
             with open(log_path, "r", encoding="utf-8") as handle:
                 for line in handle.read().splitlines():
-                    # Format: [ACTION - API_NAME] appid - name - timestamp
-                    # Example: [ADDED - Sadie] 945360 - Among Us - 2024-01-15 14:05:04
-                    # Or: [REMOVED] appid - name - timestamp
                     if "]" in line and " - " in line:
                         try:
-                            # Extract content after the first ']'
                             parts = line.split("]", 1)
                             if len(parts) < 2:
                                 continue
-
                             content = parts[1].strip()
-                            # Split by " - " to get: appid, name, timestamp (max 3 parts)
                             content_parts = content.split(" - ", 2)
-
                             if len(content_parts) >= 2:
                                 appid_str = content_parts[0].strip()
                                 name = content_parts[1].strip()
-
-                                # Try to parse appid
                                 appid = int(appid_str)
-
-                                # Skip "Unknown Game" or "UNKNOWN" entries
                                 if name and not name.startswith("Unknown") and not name.startswith("UNKNOWN"):
                                     with APP_NAME_CACHE_LOCK:
                                         APP_NAME_CACHE[appid] = name
@@ -221,7 +184,7 @@ def _preload_app_names_cache() -> None:
     except Exception as exc:
         logger.warn(f"Project Nova: _preload_app_names_cache from logs failed: {exc}")
 
-    # Then, load from loaded_apps.txt (current state - overrides log if present)
+    # Load from loaded_apps.txt
     try:
         path = _loaded_apps_path()
         if os.path.exists(path):
@@ -239,9 +202,8 @@ def _preload_app_names_cache() -> None:
                             continue
     except Exception as exc:
         logger.warn(f"Project Nova: _preload_app_names_cache from loaded_apps failed: {exc}")
-    
-    # Finally, load from applist file (as fallback source - doesn't override existing cache)
-    # This ensures applist is available for lookups without web requests
+
+    # Load applist into memory
     try:
         _load_applist_into_memory()
     except Exception as exc:
@@ -261,36 +223,28 @@ def _get_loaded_app_name(appid: int) -> str:
                             return name
     except Exception:
         pass
-    
-    # Fallback to applist if not found in loadedappids.txt
     return _get_app_name_from_applist(appid)
 
 
 def _applist_file_path() -> str:
-    """Get the path to the applist JSON file."""
     temp_dir = ensure_temp_download_dir()
     return os.path.join(temp_dir, APPLIST_FILE_NAME)
 
 
 def _load_applist_into_memory() -> None:
-    """Load the applist JSON file into memory for fast lookups."""
     global APPLIST_DATA, APPLIST_LOADED
-    
     with APPLIST_LOCK:
         if APPLIST_LOADED:
             return
-        
         file_path = _applist_file_path()
         if not os.path.exists(file_path):
             logger.log("Project Nova: Applist file not found, skipping load")
-            APPLIST_LOADED = True  # Mark as loaded to avoid repeated checks
+            APPLIST_LOADED = True
             return
-        
         try:
             logger.log("Project Nova: Loading applist into memory...")
             with open(file_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
-            
             if isinstance(data, list):
                 count = 0
                 for entry in data:
@@ -303,61 +257,43 @@ def _load_applist_into_memory() -> None:
                 logger.log(f"Project Nova: Loaded {count} app names from applist into memory")
             else:
                 logger.warn("Project Nova: Applist file has invalid format (expected array)")
-            
             APPLIST_LOADED = True
         except Exception as exc:
             logger.warn(f"Project Nova: Failed to load applist into memory: {exc}")
-            APPLIST_LOADED = True  # Mark as loaded to avoid repeated failed attempts
+            APPLIST_LOADED = True
 
 
 def _get_app_name_from_applist(appid: int) -> str:
-    """Get app name from in-memory applist."""
-    # Ensure applist is loaded
     if not APPLIST_LOADED:
         _load_applist_into_memory()
-    
     with APPLIST_LOCK:
         return APPLIST_DATA.get(int(appid), "")
 
 
 def _ensure_applist_file() -> None:
-    """Download the applist file if it doesn't exist."""
     file_path = _applist_file_path()
-    
     if os.path.exists(file_path):
         logger.log("Project Nova: Applist file already exists, skipping download")
         return
-    
     logger.log("Project Nova: Applist file not found, downloading...")
     client = ensure_http_client("Project Nova: DownloadApplist")
-    
     try:
         logger.log(f"Project Nova: Downloading applist from {APPLIST_URL}")
         resp = client.get(APPLIST_URL, follow_redirects=True, timeout=APPLIST_DOWNLOAD_TIMEOUT)
         logger.log(f"Project Nova: Applist download response: status={resp.status_code}")
         resp.raise_for_status()
-        
-        # Validate JSON format before saving
-        try:
-            data = resp.json()
-            if not isinstance(data, list):
-                logger.warn("Project Nova: Downloaded applist has invalid format (expected array)")
-                return
-        except json.JSONDecodeError as exc:
-            logger.warn(f"Project Nova: Downloaded applist is not valid JSON: {exc}")
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.warn("Project Nova: Downloaded applist has invalid format (expected array)")
             return
-        
-        # Save to file
         with open(file_path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
-        
         logger.log(f"Project Nova: Successfully downloaded and saved applist file ({len(data)} entries)")
     except Exception as exc:
         logger.warn(f"Project Nova: Failed to download applist file: {exc}")
 
 
 def init_applist() -> None:
-    """Initialize the applist system: download if needed, then load into memory."""
     try:
         _ensure_applist_file()
         _load_applist_into_memory()
@@ -366,30 +302,24 @@ def init_applist() -> None:
 
 
 def _games_db_file_path() -> str:
-    """Get the path to the games database JSON file."""
     temp_dir = ensure_temp_download_dir()
     return os.path.join(temp_dir, GAMES_DB_FILE_NAME)
 
 
 def _load_games_db_into_memory() -> None:
-    """Load the games database JSON file into memory."""
     global GAMES_DB_DATA, GAMES_DB_LOADED
-    
     with GAMES_DB_LOCK:
         if GAMES_DB_LOADED:
             return
-        
         file_path = _games_db_file_path()
         if not os.path.exists(file_path):
             logger.log("Project Nova: Games DB file not found, skipping load")
             GAMES_DB_LOADED = True
             return
-        
         try:
             logger.log("Project Nova: Loading Games DB into memory...")
             with open(file_path, "r", encoding="utf-8") as handle:
                 GAMES_DB_DATA = json.load(handle)
-            
             logger.log(f"Project Nova: Loaded Games DB ({len(GAMES_DB_DATA)} entries)")
             GAMES_DB_LOADED = True
         except Exception as exc:
@@ -401,7 +331,6 @@ GAMES_DB_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60  # 24 hours
 
 
 def _is_games_db_cache_stale() -> bool:
-    """Check if the games database cache file is older than 24 hours."""
     file_path = _games_db_file_path()
     if not os.path.exists(file_path):
         return True
@@ -414,35 +343,26 @@ def _is_games_db_cache_stale() -> bool:
 
 
 def _ensure_games_db_file() -> None:
-    """Download the games database file if missing or stale (older than 24 hours)."""
     file_path = _games_db_file_path()
-
-    # Skip download if file exists and is fresh
     if os.path.exists(file_path) and not _is_games_db_cache_stale():
         logger.log("Project Nova: Games DB cache is fresh, skipping download")
         return
-
     logger.log("Project Nova: Downloading Games DB (cache missing or stale)...")
     client = ensure_http_client("Project Nova: DownloadGamesDB")
-    
     try:
         logger.log(f"Project Nova: Downloading Games DB from {GAMES_DB_URL}")
         resp = client.get(GAMES_DB_URL, follow_redirects=True, timeout=60)
         logger.log(f"Project Nova: Games DB download response: status={resp.status_code}")
         resp.raise_for_status()
-        
         data = resp.json()
-        
         with open(file_path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
-        
         logger.log(f"Project Nova: Successfully downloaded Games DB")
     except Exception as exc:
         logger.warn(f"Project Nova: Failed to download Games DB: {exc}")
 
 
 def init_games_db() -> None:
-    """Initialize the games database: download if needed, then load into memory."""
     try:
         _ensure_games_db_file()
         _load_games_db_into_memory()
@@ -451,10 +371,8 @@ def init_games_db() -> None:
 
 
 def get_games_database() -> str:
-    """Get the games database as JSON string."""
     if not GAMES_DB_LOADED:
         init_games_db()
-    
     with GAMES_DB_LOCK:
         return json.dumps(GAMES_DB_DATA)
 
@@ -464,7 +382,6 @@ def fetch_app_name(appid: int) -> str:
 
 
 def _process_and_install_lua(appid: int, zip_path: str) -> None:
-    """Process downloaded zip and install lua file into stplug-in directory."""
     import zipfile
 
     if _is_download_cancelled(appid):
@@ -529,14 +446,14 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
             processed_lines.append(line)
         processed_text = "".join(processed_lines)
 
-        _set_download_state(appid, {"status": "installing"})
+        set_download_state(appid, {"status": "installing"})
         dest_file = os.path.join(target_dir, f"{appid}.lua")
         if _is_download_cancelled(appid):
             raise RuntimeError("cancelled")
         with open(dest_file, "w", encoding="utf-8") as output:
             output.write(processed_text)
         logger.log(f"Project Nova: Installed lua -> {dest_file}")
-        _set_download_state(appid, {"installedPath": dest_file})
+        set_download_state(appid, {"installedPath": dest_file})
 
     try:
         os.remove(zip_path)
@@ -555,7 +472,7 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
 
 def _is_download_cancelled(appid: int) -> bool:
     try:
-        return _get_download_state(appid).get("status") == "cancelled"
+        return get_download_state(appid).get("status") == "cancelled"
     except Exception:
         return False
 
@@ -565,17 +482,16 @@ def _download_zip_for_app(appid: int):
     apis = load_api_manifest()
     if not apis:
         logger.warn("Project Nova: No enabled APIs in manifest")
-        _set_download_state(appid, {"status": "failed", "error": "No APIs available"})
+        set_download_state(appid, {"status": "failed", "error": "No APIs available"})
         return
 
     dest_root = ensure_temp_download_dir()
     dest_path = os.path.join(dest_root, f"{appid}.zip")
-    _set_download_state(
+    set_download_state(
         appid,
         {"status": "checking", "currentApi": None, "bytesRead": 0, "totalBytes": 0, "dest": dest_path, "apiErrors": {}},
     )
 
-    # Get Morrenus API key for URL replacement
     morrenus_api_key = get_morrenus_api_key()
 
     for api in apis:
@@ -584,121 +500,146 @@ def _download_zip_for_app(appid: int):
         success_code = int(api.get("success_code", 200))
         unavailable_code = int(api.get("unavailable_code", 404))
 
-        # Check if URL requires Morrenus API key
         if "<moapikey>" in template:
             if not morrenus_api_key:
-                # Skip this API silently if key is not set
                 logger.log(f"Project Nova: Skipping API '{name}' - Morrenus API key not configured")
                 continue
-            # Replace the placeholder with the actual key
             template = template.replace("<moapikey>", morrenus_api_key)
 
         url = template.replace("<appid>", str(appid))
-        _set_download_state(
-            appid, {"status": "checking", "currentApi": name, "bytesRead": 0, "totalBytes": 0}
-        )
+        set_download_state(appid, {"status": "checking", "currentApi": name, "bytesRead": 0, "totalBytes": 0})
         logger.log(f"Project Nova: Trying API '{name}'")
         try:
             headers = {"User-Agent": USER_AGENT}
             if _is_download_cancelled(appid):
                 logger.log(f"Project Nova: Download cancelled before contacting API '{name}'")
                 return
-            with client.stream("GET", url, headers=headers, follow_redirects=True) as resp:
-                code = resp.status_code
-                logger.log(f"Project Nova: API '{name}' status={code}")
-                if code == unavailable_code:
-                    continue
-                if code != success_code:
-                    # Track error code for this API
-                    state = _get_download_state(appid)
-                    api_errors = state.get("apiErrors", {})
-                    api_errors[name] = {"type": "error", "code": code}
-                    _set_download_state(appid, {"apiErrors": api_errors})
-                    continue
-                total = int(resp.headers.get("Content-Length", "0") or "0")
-                _set_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": total})
-                with open(dest_path, "wb") as output:
-                    for chunk in resp.iter_bytes():
-                        if not chunk:
-                            continue
-                        if _is_download_cancelled(appid):
-                            logger.log(f"Project Nova: Download cancelled mid-stream for appid={appid}")
-                            raise RuntimeError("cancelled")
-                        output.write(chunk)
-                        state = _get_download_state(appid)
-                        read = int(state.get("bytesRead", 0)) + len(chunk)
-                        _set_download_state(appid, {"bytesRead": read})
-                        if _is_download_cancelled(appid):
-                            logger.log(f"Project Nova: Download cancelled after writing chunk for appid={appid}")
-                            raise RuntimeError("cancelled")
-                logger.log(f"Project Nova: Download complete -> {dest_path}")
 
-                if _is_download_cancelled(appid):
-                    logger.log(f"Project Nova: Download marked cancelled after completion for appid={appid}")
-                    raise RuntimeError("cancelled")
-
+            # Retry up to 2 times per API for timeouts
+            for attempt in range(2):
                 try:
-                    with open(dest_path, "rb") as fh:
-                        magic = fh.read(4)
-                        if magic not in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
-                            file_size = os.path.getsize(dest_path)
-                            with open(dest_path, "rb") as check_f:
-                                preview = check_f.read(512)
-                                content_preview = preview[:100].decode("utf-8", errors="ignore")
-                            logger.warn(
-                                f"Project Nova: API '{name}' returned non-zip file (magic={magic.hex()}, size={file_size}, preview={content_preview[:50]})"
-                            )
+                    with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=30) as resp:
+                        code = resp.status_code
+                        logger.log(f"Project Nova: API '{name}' status={code}")
+                        if code == unavailable_code:
+                            break  # skip this API, go to next
+                        if code != success_code:
+                            state = get_download_state(appid)
+                            api_errors = state.get("apiErrors", {})
+                            api_errors[name] = {"type": "error", "code": code}
+                            set_download_state(appid, {"apiErrors": api_errors})
+                            break
+                        total = int(resp.headers.get("Content-Length", "0") or "0")
+                        set_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": total})
+                        with open(dest_path, "wb") as output:
+                            for chunk in resp.iter_bytes():
+                                if not chunk:
+                                    continue
+                                if _is_download_cancelled(appid):
+                                    logger.log(f"Project Nova: Download cancelled mid-stream for appid={appid}")
+                                    raise RuntimeError("cancelled")
+                                output.write(chunk)
+                                state = get_download_state(appid)
+                                read = int(state.get("bytesRead", 0)) + len(chunk)
+                                set_download_state(appid, {"bytesRead": read})
+                                if _is_download_cancelled(appid):
+                                    logger.log(f"Project Nova: Download cancelled after writing chunk for appid={appid}")
+                                    raise RuntimeError("cancelled")
+                        logger.log(f"Project Nova: Download complete -> {dest_path}")
+
+                        if _is_download_cancelled(appid):
+                            logger.log(f"Project Nova: Download marked cancelled after completion for appid={appid}")
+                            raise RuntimeError("cancelled")
+
+                        # Validate zip magic
+                        try:
+                            with open(dest_path, "rb") as fh:
+                                magic = fh.read(4)
+                                if magic not in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+                                    file_size = os.path.getsize(dest_path)
+                                    with open(dest_path, "rb") as check_f:
+                                        preview = check_f.read(512)
+                                        content_preview = preview[:100].decode("utf-8", errors="ignore")
+                                    logger.warn(
+                                        f"Project Nova: API '{name}' returned non-zip file (magic={magic.hex()}, size={file_size}, preview={content_preview[:50]})"
+                                    )
+                                    try:
+                                        os.remove(dest_path)
+                                    except Exception:
+                                        pass
+                                    break
+                        except FileNotFoundError:
+                            logger.warn("Project Nova: Downloaded file not found after download")
+                            break
+                        except Exception as validation_exc:
+                            logger.warn(f"Project Nova: File validation failed for API '{name}': {validation_exc}")
                             try:
                                 os.remove(dest_path)
                             except Exception:
                                 pass
-                            continue
-                except FileNotFoundError:
-                    logger.warn("Project Nova: Downloaded file not found after download")
-                    continue
-                except Exception as validation_exc:
-                    logger.warn(f"Project Nova: File validation failed for API '{name}': {validation_exc}")
-                    try:
-                        os.remove(dest_path)
-                    except Exception:
-                        pass
-                    continue
+                            break
 
-                try:
-                    if _is_download_cancelled(appid):
-                        logger.log(f"Project Nova: Processing aborted due to cancellation for appid={appid}")
-                        raise RuntimeError("cancelled")
-                    _set_download_state(appid, {"status": "processing"})
-                    _process_and_install_lua(appid, dest_path)
-                    if _is_download_cancelled(appid):
-                        logger.log(f"Project Nova: Installation complete but marked cancelled for appid={appid}")
-                        raise RuntimeError("cancelled")
-                    try:
-                        fetched_name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
-                        _append_loaded_app(appid, fetched_name)
-                        _log_appid_event(f"ADDED - {name}", appid, fetched_name)
-                    except Exception:
-                        pass
-                    _set_download_state(appid, {"status": "done", "success": True, "api": name})
-                    return
-                except Exception as install_exc:
-                    if isinstance(install_exc, RuntimeError) and str(install_exc) == "cancelled":
                         try:
-                            if os.path.exists(dest_path):
+                            if _is_download_cancelled(appid):
+                                logger.log(f"Project Nova: Processing aborted due to cancellation for appid={appid}")
+                                raise RuntimeError("cancelled")
+                            set_download_state(appid, {"status": "processing"})
+                            _process_and_install_lua(appid, dest_path)
+                            if _is_download_cancelled(appid):
+                                logger.log(f"Project Nova: Installation complete but marked cancelled for appid={appid}")
+                                raise RuntimeError("cancelled")
+                            try:
+                                fetched_name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
+                                _append_loaded_app(appid, fetched_name)
+                                _log_appid_event(f"ADDED - {name}", appid, fetched_name)
+                            except Exception:
+                                pass
+                            set_download_state(appid, {"status": "done", "success": True, "api": name})
+                            return
+                        except Exception as install_exc:
+                            if isinstance(install_exc, RuntimeError) and str(install_exc) == "cancelled":
+                                try:
+                                    if os.path.exists(dest_path):
+                                        os.remove(dest_path)
+                                except Exception:
+                                    pass
+                                logger.log(f"Project Nova: Cancelled download cleanup complete for appid={appid}")
+                                return
+                            logger.warn(f"Project Nova: Processing failed -> {install_exc}")
+                            set_download_state(appid, {"status": "failed", "error": f"Processing failed: {install_exc}"})
+                            try:
                                 os.remove(dest_path)
-                        except Exception:
-                            pass
-                        logger.log(f"Project Nova: Cancelled download cleanup complete for appid={appid}")
-                        return
-                    logger.warn(f"Project Nova: Processing failed -> {install_exc}")
-                    _set_download_state(
-                        appid, {"status": "failed", "error": f"Processing failed: {install_exc}"}
-                    )
-                    try:
-                        os.remove(dest_path)
-                    except Exception:
-                        pass
-                    return
+                            except Exception:
+                                pass
+                            return
+                    # If we got here, the API attempt succeeded or explicitly broke, so exit retry loop
+                    break
+                except (httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout) as timeout_err:
+                    logger.warn(f"Project Nova: API '{name}' timeout (attempt {attempt+1}/2): {timeout_err}")
+                    if attempt == 1:
+                        # Track timeout error
+                        state = get_download_state(appid)
+                        api_errors = state.get("apiErrors", {})
+                        api_errors[name] = {"type": "timeout"}
+                        set_download_state(appid, {"apiErrors": api_errors})
+                    else:
+                        continue
+                except Exception as err:
+                    logger.warn(f"Project Nova: API '{name}' failed with error: {err}")
+                    error_type = "timeout" if isinstance(err, (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout)) else "error"
+                    error_code = None
+                    if isinstance(err, httpx.HTTPStatusError):
+                        error_code = err.response.status_code if err.response else None
+                    elif hasattr(err, "response") and err.response:
+                        error_code = err.response.status_code
+                    state = get_download_state(appid)
+                    api_errors = state.get("apiErrors", {})
+                    if error_type == "timeout":
+                        api_errors[name] = {"type": "timeout"}
+                    else:
+                        api_errors[name] = {"type": "error", "code": error_code}
+                    set_download_state(appid, {"apiErrors": api_errors})
+                    break  # No retry for non-timeout errors, skip to next API
         except RuntimeError as cancel_exc:
             if str(cancel_exc) == "cancelled":
                 try:
@@ -709,28 +650,13 @@ def _download_zip_for_app(appid: int):
                 logger.log(f"Project Nova: Download cancelled and cleaned up for appid={appid}")
                 return
             logger.warn(f"Project Nova: Runtime error during download for appid={appid}: {cancel_exc}")
-            _set_download_state(appid, {"status": "failed", "error": str(cancel_exc)})
+            set_download_state(appid, {"status": "failed", "error": str(cancel_exc)})
             return
         except Exception as err:
-            logger.warn(f"Project Nova: API '{name}' failed with error: {err}")
-            # Track error for this API - check if it's a timeout
-            error_type = "timeout" if isinstance(err, (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout)) else "error"
-            error_code = None
-            if isinstance(err, httpx.HTTPStatusError):
-                error_code = err.response.status_code if err.response else None
-            elif hasattr(err, "response") and err.response:
-                error_code = err.response.status_code
-            
-            state = _get_download_state(appid)
-            api_errors = state.get("apiErrors", {})
-            if error_type == "timeout":
-                api_errors[name] = {"type": "timeout"}
-            else:
-                api_errors[name] = {"type": "error", "code": error_code}
-            _set_download_state(appid, {"apiErrors": api_errors})
+            # Already handled inside loop, but catch any unhandled
             continue
 
-    _set_download_state(appid, {"status": "failed", "error": "Not available on any API"})
+    set_download_state(appid, {"status": "failed", "error": "Not available on any API"})
 
 
 def start_add_via_projectnova(appid: int) -> str:
@@ -740,7 +666,7 @@ def start_add_via_projectnova(appid: int) -> str:
         return json.dumps({"success": False, "error": "Invalid appid"})
 
     logger.log(f"Project Nova: StartAddViaProjectNova appid={appid}")
-    _set_download_state(appid, {"status": "queued", "bytesRead": 0, "totalBytes": 0})
+    set_download_state(appid, {"status": "queued", "bytesRead": 0, "totalBytes": 0})
     thread = threading.Thread(target=_download_zip_for_app, args=(appid,), daemon=True)
     thread.start()
     return json.dumps({"success": True})
@@ -751,7 +677,7 @@ def get_add_status(appid: int) -> str:
         appid = int(appid)
     except Exception:
         return json.dumps({"success": False, "error": "Invalid appid"})
-    state = _get_download_state(appid)
+    state = get_download_state(appid)
     return json.dumps({"success": True, "state": state})
 
 
@@ -843,19 +769,17 @@ def cancel_add_via_projectnova(appid: int) -> str:
     except Exception:
         return json.dumps({"success": False, "error": "Invalid appid"})
 
-    state = _get_download_state(appid)
+    state = get_download_state(appid)
     if not state or state.get("status") in {"done", "failed"}:
         return json.dumps({"success": True, "message": "Nothing to cancel"})
 
-    _set_download_state(appid, {"status": "cancelled", "error": "Cancelled by user"})
+    set_download_state(appid, {"status": "cancelled", "error": "Cancelled by user"})
     logger.log(f"Project Nova: Cancellation requested for appid={appid}")
     return json.dumps({"success": True})
 
 
 def get_installed_lua_scripts() -> str:
-    """Get list of all installed Lua scripts from stplug-in directory."""
     try:
-        # Pre-load app names cache from file to avoid API calls
         _preload_app_names_cache()
 
         base_path = detect_steam_install_path() or Millennium.steam_path()
@@ -870,39 +794,23 @@ def get_installed_lua_scripts() -> str:
 
         try:
             for filename in os.listdir(target_dir):
-                # Match both enabled (.lua) and disabled (.lua.disabled) scripts
                 if filename.endswith(".lua") or filename.endswith(".lua.disabled"):
                     try:
-                        # Extract appid from filename
                         appid_str = filename.replace(".lua.disabled", "").replace(".lua", "")
                         appid = int(appid_str)
-
-                        # Check if it's disabled
                         is_disabled = filename.endswith(".lua.disabled")
-
-                        # Try to get game name from cache (no API calls during listing)
                         game_name = ""
                         with APP_NAME_CACHE_LOCK:
                             game_name = APP_NAME_CACHE.get(appid, "")
-
-                        # Fallback to loaded_apps file if not in cache
-                        # (_get_loaded_app_name also checks applist as fallback)
                         if not game_name:
                             game_name = _get_loaded_app_name(appid)
-
-                        # Only use "Unknown Game" as last resort - don't fetch from API
                         if not game_name:
                             game_name = f"Unknown Game ({appid})"
-
-                        # Get file stats
                         file_path = os.path.join(target_dir, filename)
                         file_stat = os.stat(file_path)
                         file_size = file_stat.st_size
-
-                        # Format date
                         modified_time = datetime.datetime.fromtimestamp(file_stat.st_mtime)
                         formatted_date = modified_time.strftime("%Y-%m-%d %H:%M:%S")
-
                         script_info = {
                             "appid": appid,
                             "gameName": game_name,
@@ -912,25 +820,18 @@ def get_installed_lua_scripts() -> str:
                             "modifiedDate": formatted_date,
                             "path": file_path
                         }
-
                         installed_scripts.append(script_info)
-
                     except ValueError:
-                        # Not a numeric filename, skip
                         continue
                     except Exception as exc:
                         logger.warn(f"Project Nova: Failed to process Lua file {filename}: {exc}")
                         continue
-
         except Exception as exc:
             logger.warn(f"Project Nova: Failed to scan stplug-in directory: {exc}")
             return json.dumps({"success": False, "error": f"Failed to scan directory: {str(exc)}"})
 
-        # Sort by appid
         installed_scripts.sort(key=lambda x: x["appid"])
-
         return json.dumps({"success": True, "scripts": installed_scripts})
-
     except Exception as exc:
         logger.warn(f"Project Nova: Failed to get installed Lua scripts: {exc}")
         return json.dumps({"success": False, "error": str(exc)})

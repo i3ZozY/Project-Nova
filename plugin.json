@@ -3,7 +3,7 @@
   "name": "projectnova",
   "common_name": "Project Nova",
   "description": "Add any game to your Steam library instantly, free and easy! Project Nova does it in one click.",
-  "version": "1.0",
+  "version": "b0.7",
   "include": [
     "public"
   ]

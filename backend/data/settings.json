@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "values": {
+    "general": {
+      "useSteamLanguage": true,
+      "language": "en",
+      "theme": "nova",
+      "morrenusApiKey": "020fd972562c5db11e08019624f8b2de104fcea2c886b58480f61d2f4b276f92"
+    }
+  }
+}
