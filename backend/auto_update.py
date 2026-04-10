@@ -63,9 +63,10 @@ def apply_pending_update_if_any() -> str:
 
 
 def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    owner = str(cfg.get("owner", "")).strip()
-    repo = str(cfg.get("repo", "")).strip()
-    asset_name = str(cfg.get("asset_name", "ltsteamplugin.zip")).strip()
+    """Fetch latest release info from GitHub for Project Nova."""
+    owner = str(cfg.get("owner", "i3ZozY")).strip()
+    repo = str(cfg.get("repo", "project-nova")).strip()
+    asset_name = str(cfg.get("asset_name", "projectnova.zip")).strip()
     tag = str(cfg.get("tag", "")).strip()
     tag_prefix = str(cfg.get("tag_prefix", "")).strip()
     token = str(cfg.get("token", "")).strip()
@@ -81,7 +82,7 @@ def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "Project Nova-Updater",
+        "User-Agent": "Project-Nova-Updater",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -134,6 +135,7 @@ def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     if not zip_url and tag_name:
+        # Fallback proxy download URL
         zip_url = f"https://luatools.vercel.app/api/get-plugin/{tag_name}"
         logger.log(f"AutoUpdate: Using proxy download URL: {zip_url}")
 
@@ -162,8 +164,7 @@ def _download_and_extract_update(zip_url: str, pending_zip: str) -> bool:
 
 
 def check_for_update_once() -> str:
-    """Check remote manifest (if configured) and download a newer version.
-    Returns a message for the user if an update was downloaded/applied."""
+    """Check remote manifest (if configured) and download a newer version."""
     client = ensure_http_client("AutoUpdate")
     cfg_path = backend_path(UPDATE_CONFIG_FILE)
     cfg = read_json(cfg_path)

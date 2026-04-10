@@ -29,6 +29,11 @@ function Write-SuccessMsg {
     Write-Host "[SUCCESS] $Message"
 }
 
+function Write-WarningMsg {
+    param([string]$Message)
+    Write-Host "[WARNING] $Message"
+}
+
 function Get-SteamPath {
     $registryPaths = @(
         "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
@@ -51,6 +56,7 @@ function Get-DepotIdsFromLua {
     $depots = @()
     $content = Get-Content -Path $LuaPath -ErrorAction Stop
     foreach ($line in $content) {
+        # Exact regex from beta 0.7 that was proven to work
         if ($line -match 'addappid\s*\(\s*(\d+)\s*,\s*\d+\s*,\s*"[a-fA-F0-9]+"') {
             $depots += $matches[1]
         }
@@ -84,7 +90,7 @@ function Download-Manifest {
     param([string]$DepotId, [string]$ManifestId, [string]$OutputPath, [string]$Mode, [string]$ApiKey)
     $outputFile = Join-Path $OutputPath "${DepotId}_${ManifestId}.manifest"
     $githubUrl = "https://raw.githubusercontent.com/qwe213312/k25FCdfEOoEJ42S6/main/${DepotId}_${ManifestId}.manifest"
-    Write-ProgressMsg "Downloading $DepotId from GitHub..."
+    Write-ProgressMsg "Downloading depot $DepotId from GitHub..."
     try {
         Invoke-WebRequest -Uri $githubUrl -Method Get -TimeoutSec 120 -OutFile $outputFile -ErrorAction Stop
         if ((Get-Item $outputFile).Length -gt 0) {
@@ -154,27 +160,40 @@ try {
         New-Item -ItemType Directory -Path $depotCachePath -Force | Out-Null
     }
 
+    # Determine which API key to use for fallback
+    $apiKeyForFallback = ""
+    if ($Mode -eq "github+morrenus") { $apiKeyForFallback = $MorrenusApiKey }
+    elseif ($Mode -eq "github+manifesthub") { $apiKeyForFallback = $ManifestHubApiKey }
+
     $successCount = 0
+    $failedCount = 0
+    $skippedCount = 0
     foreach ($depotId in $depotIds) {
         $manifestId = Get-ManifestIdForDepot -AppInfo $appInfo -AppId $AppId -DepotId $depotId
         if (-not $manifestId) {
-            Write-ErrorMsg "No manifest ID found for depot $depotId"
+            Write-WarningMsg "No manifest ID found for depot $depotId (skipping)"
+            $skippedCount++
             continue
         }
         Write-ProgressMsg "Processing depot $depotId (manifest $manifestId)"
-        if (Download-Manifest -DepotId $depotId -ManifestId $manifestId -OutputPath $depotCachePath -Mode $Mode -ApiKey ($MorrenusApiKey + $ManifestHubApiKey)) {
+        if (Download-Manifest -DepotId $depotId -ManifestId $manifestId -OutputPath $depotCachePath -Mode $Mode -ApiKey $apiKeyForFallback) {
             $successCount++
         } else {
+            $failedCount++
             Write-ErrorMsg "Failed to download manifest for depot $depotId"
         }
     }
 
-    if ($successCount -eq $depotIds.Count) {
-        Write-SuccessMsg "All manifests downloaded successfully"
+    # Report results
+    if ($failedCount -gt 0) {
+        Write-ErrorMsg "Failed to download $failedCount manifest(s). ($successCount succeeded, $skippedCount skipped)"
+        exit 1
+    } elseif ($successCount -gt 0) {
+        Write-SuccessMsg "Successfully downloaded $successCount manifest(s). ($skippedCount skipped)"
         exit 0
     } else {
-        Write-ErrorMsg "Only $successCount of $($depotIds.Count) manifests downloaded"
-        exit 1
+        Write-SuccessMsg "No manifest updates were required (all $skippedCount depots skipped)."
+        exit 0
     }
 } catch {
     Write-ErrorMsg "Unexpected error: $($_.Exception.Message)"

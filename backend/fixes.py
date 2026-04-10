@@ -130,6 +130,7 @@ def check_for_fixes(appid: int) -> str:
 
 
 def _download_and_extract_fix(appid: int, download_url: str, install_path: str, fix_type: str, game_name: str = ""):
+    import httpx
     client = ensure_http_client("Project Nova: fix download")
     try:
         dest_root = ensure_temp_download_dir()

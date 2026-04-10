@@ -53,9 +53,7 @@ from logger import logger as shared_logger
 from paths import get_plugin_dir, public_path
 from settings.manager import (
     apply_settings_changes,
-    get_available_locales,
     get_settings_payload,
-    get_translation_map,
     init_settings,
 )
 from steam_utils import detect_steam_install_path, get_game_install_path_response, open_game_folder
@@ -73,12 +71,10 @@ MANIFEST_UPDATER_STATE = {
 MANIFEST_UPDATER_LOCK = threading.Lock()
 
 
-def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", manifesthubKey="", **kwargs):
+def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", manifesthubKey="", hideWindow=True, **kwargs):
     """
     Called from frontend to start the manifest updater.
-    Accepts keyword arguments: appid, mode, morrenusKey, manifesthubKey.
     """
-    # Also handle legacy call where args are passed as a dict
     if appid is None and kwargs.get('args'):
         args = kwargs['args']
         if isinstance(args, dict):
@@ -86,12 +82,11 @@ def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", 
             mode = args.get('mode', 'github')
             morrenusKey = args.get('morrenusKey', '')
             manifesthubKey = args.get('manifesthubKey', '')
-    
+
     if not appid or not str(appid).isdigit():
         logger.error(f"Invalid AppID: {appid}")
         return json.dumps({"success": False, "error": "Valid numeric App ID required"})
-    
-    # Reset state
+
     with MANIFEST_UPDATER_LOCK:
         MANIFEST_UPDATER_STATE["status"] = "running"
         MANIFEST_UPDATER_STATE["output"] = ""
@@ -101,33 +96,43 @@ def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", 
     def run_script():
         plugin_root = get_plugin_dir()
         script_path = os.path.join(plugin_root, "manifests.ps1")
+        logger.log(f"Looking for manifest script at: {script_path}")
         if not os.path.exists(script_path):
             with MANIFEST_UPDATER_LOCK:
                 MANIFEST_UPDATER_STATE["status"] = "error"
-                MANIFEST_UPDATER_STATE["error"] = "manifests.ps1 not found in plugin root"
+                MANIFEST_UPDATER_STATE["error"] = f"manifests.ps1 not found at {script_path}"
             return
 
-        # Build command
+        # Build command in correct order
         cmd = [
             "powershell.exe",
-            "-ExecutionPolicy", "Bypass",
+            "-ExecutionPolicy", "Bypass"
+        ]
+        if hideWindow:
+            cmd.extend(["-WindowStyle", "Hidden"])
+        cmd.extend([
             "-File", script_path,
             "-AppId", str(appid),
             "-Mode", mode
-        ]
+        ])
         if morrenusKey:
-            cmd += ["-MorrenusApiKey", morrenusKey]
+            cmd.extend(["-MorrenusApiKey", morrenusKey])
         if manifesthubKey:
-            cmd += ["-ManifestHubApiKey", manifesthubKey]
+            cmd.extend(["-ManifestHubApiKey", manifesthubKey])
+
+        logger.log(f"Running command: {' '.join(cmd)}")
 
         try:
+            creationflags = subprocess.CREATE_NO_WINDOW if hideWindow else 0
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                creationflags=creationflags,
+                cwd=plugin_root
             )
             output_lines = []
             for line in iter(process.stdout.readline, ''):
@@ -135,17 +140,22 @@ def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", 
                     output_lines.append(line)
                     with MANIFEST_UPDATER_LOCK:
                         MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-50:])
+                    logger.log(f"[MANIFEST] {line.strip()}")
             process.wait()
-            if process.returncode == 0:
+            exit_code = process.returncode
+            logger.log(f"Manifest script exited with code {exit_code}")
+
+            if exit_code == 0:
                 with MANIFEST_UPDATER_LOCK:
                     MANIFEST_UPDATER_STATE["status"] = "done"
                     MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
             else:
                 with MANIFEST_UPDATER_LOCK:
                     MANIFEST_UPDATER_STATE["status"] = "error"
-                    MANIFEST_UPDATER_STATE["error"] = f"Script exited with code {process.returncode}"
+                    MANIFEST_UPDATER_STATE["error"] = f"Script exited with code {exit_code}. Check logs for details."
                     MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
         except Exception as e:
+            logger.error(f"Manifest updater exception: {e}")
             with MANIFEST_UPDATER_LOCK:
                 MANIFEST_UPDATER_STATE["status"] = "error"
                 MANIFEST_UPDATER_STATE["error"] = str(e)
@@ -372,9 +382,6 @@ def GetSettingsConfig(contentScriptQuery: str = "") -> str:
             "schemaVersion": payload.get("version"),
             "schema": payload.get("schema", []),
             "values": payload.get("values", {}),
-            "language": payload.get("language"),
-            "locales": payload.get("locales", []),
-            "translations": payload.get("translations", {}),
         }
         return json.dumps(response)
     except Exception as exc:
@@ -408,15 +415,6 @@ def ApplySettingsChanges(
             changes = kwargs["changes"]
         if changes is None:
             changes = kwargs
-
-        try:
-            logger.log(
-                "Project Nova: ApplySettingsChanges raw argument "
-                f"type={type(changes)} value={changes!r}"
-            )
-            logger.log(f"Project Nova: ApplySettingsChanges kwargs: {kwargs}")
-        except Exception:
-            pass
 
         payload: Any = None
 
@@ -465,63 +463,12 @@ def ApplySettingsChanges(
             logger.warn(f"Project Nova: Parsed payload is not a dict: {payload!r}")
             return json.dumps({"success": False, "error": "Invalid payload format"})
 
-        try:
-            logger.log(f"Project Nova: ApplySettingsChanges received payload: {payload}")
-        except Exception:
-            pass
-
         result = apply_settings_changes(payload)
-        try:
-            logger.log(f"Project Nova: ApplySettingsChanges result: {result}")
-        except Exception:
-            pass
         response = json.dumps(result)
-        try:
-            logger.log(f"Project Nova: ApplySettingsChanges response json: {response}")
-        except Exception:
-            pass
         return response
     except Exception as exc:
         logger.warn(f"Project Nova: ApplySettingsChanges failed: {exc}")
         return json.dumps({"success": False, "error": str(exc)})
-
-
-def GetAvailableLocales(contentScriptQuery: str = "") -> str:
-    try:
-        locales = get_available_locales()
-        return json.dumps({"success": True, "locales": locales})
-    except Exception as exc:
-        logger.warn(f"Project Nova: GetAvailableLocales failed: {exc}")
-        return json.dumps({"success": False, "error": str(exc)})
-
-
-def GetTranslations(contentScriptQuery: str = "", language: str = "", **kwargs: Any) -> str:
-    try:
-        if not language and "language" in kwargs:
-            language = kwargs["language"]
-        bundle = get_translation_map(language)
-        bundle["success"] = True
-        return json.dumps(bundle)
-    except Exception as exc:
-        logger.warn(f"Project Nova: GetTranslations failed: {exc}")
-        return json.dumps({"success": False, "error": str(exc)})
-
-
-def GetAvailableThemes(contentScriptQuery: str = "") -> str:
-    try:
-        themes_dir = os.path.join(get_plugin_dir(), "public", "themes")
-        themes = []
-        if os.path.exists(themes_dir):
-            for filename in os.listdir(themes_dir):
-                if filename.endswith(".css"):
-                    theme_name = filename[:-4]
-                    display_name = theme_name.capitalize()
-                    themes.append({"value": theme_name, "label": display_name})
-        themes.sort(key=lambda x: (x["value"] != "original", x["label"]))
-        return json.dumps({"success": True, "themes": themes})
-    except Exception as exc:
-        logger.warn(f"Project Nova: GetAvailableThemes failed: {exc}")
-        return json.dumps({"success": False, "error": str(exc), "themes": []})
 
 
 # ========================== Plugin Lifecycle ==========================

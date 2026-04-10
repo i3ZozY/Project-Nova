@@ -9,71 +9,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from logger import logger
 from paths import backend_path, get_plugin_dir
 
-from locales import DEFAULT_LOCALE, PLACEHOLDER_VALUE, get_locale_manager
-
-# Mapping from Steam registry language values to plugin locale codes.
-# Includes all Steam-supported languages. Languages without a matching
-# locale file will fall back to 'en' at runtime (checked against available locales).
-_STEAM_LANG_TO_LOCALE = {
-    "arabic": "ar",
-    "bulgarian": "bg",
-    "brazilian": "pt-BR",
-    "czech": "cs",
-    "danish": "da",
-    "dutch": "nl",
-    "english": "en",
-    "finnish": "fi",
-    "french": "fr",
-    "german": "de",
-    "greek": "el",
-    "hungarian": "hu",
-    "indonesian": "id",
-    "italian": "it",
-    "japanese": "ja",
-    "koreana": "ko",
-    "latam": "es",
-    "norwegian": "no",
-    "polish": "pl",
-    "portuguese": "pt",
-    "romanian": "ro",
-    "russian": "ru",
-    "schinese": "zh-CN",
-    "spanish": "es",
-    "swedish": "sv",
-    "tchinese": "zh-TW",
-    "thai": "th",
-    "turkish": "tr",
-    "ukrainian": "uk",
-    "vietnamese": "vi",
-}
-
-
-_detected_steam_lang: Optional[str] = None
-_detected_steam_lang_checked: bool = False
-
-
-def _detect_steam_language() -> Optional[str]:
-    """Read Steam's UI language from the Windows registry and map it to a plugin locale code.
-    Result is cached for the lifetime of the process (Steam language doesn't change at runtime)."""
-    global _detected_steam_lang, _detected_steam_lang_checked
-    if _detected_steam_lang_checked:
-        return _detected_steam_lang
-    _detected_steam_lang_checked = True
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
-            steam_lang, _ = winreg.QueryValueEx(key, "Language")
-            steam_lang = str(steam_lang).strip().lower()
-            locale_code = _STEAM_LANG_TO_LOCALE.get(steam_lang)
-            if locale_code:
-                logger.log(f"Project Nova: detected Steam language '{steam_lang}' -> locale '{locale_code}'")
-                _detected_steam_lang = locale_code
-                return locale_code
-            logger.log(f"Project Nova: Steam language '{steam_lang}' has no matching locale, using default")
-    except Exception as exc:
-        logger.log(f"Project Nova: could not read Steam language from registry: {exc}")
-    return None
-
 from .options import (
     SETTINGS_GROUPS,
     SettingOption,
@@ -89,23 +24,8 @@ _SETTINGS_CACHE: Dict[str, Any] | None = None
 _CHANGE_HOOKS: Dict[Tuple[str, str], List[Callable[[Any, Any], None]]] = {}
 
 
-def _available_locale_codes() -> List[Dict[str, Any]]:
-    manager = get_locale_manager()
-    locales = manager.available_locales()
-    if not locales:
-        # Guarantee default locale presence even if file missing
-        locales = [{"code": DEFAULT_LOCALE, "name": "English", "nativeName": "English"}]
-    return locales
-
-
 def _available_theme_files() -> List[Dict[str, Any]]:
-    """Return list of available theme files.
-
-    This first attempts to read a single source-of-truth JSON file
-    `public/themes/themes.json`. If that is missing or invalid it
-    falls back to scanning the `public/themes` directory for `.css`
-    files. If both fail, a built-in fallback list is returned.
-    """
+    """Return list of available theme files."""
     themes = []
     # Primary: read themes.json
     try:
@@ -162,14 +82,6 @@ def _available_theme_files() -> List[Dict[str, Any]]:
 
 
 def _inject_locale_choices(schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    locale_choices = [
-        {
-            "value": locale["code"],
-            "label": locale.get("nativeName") or locale.get("name") or locale["code"],
-        }
-        for locale in _available_locale_codes()
-    ]
-
     theme_choices = _available_theme_files()
 
     for group in schema:
@@ -177,12 +89,7 @@ def _inject_locale_choices(schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             continue
         options = group.get("options") or []
         for option in options:
-            if option.get("key") == "language":
-                option["choices"] = locale_choices
-                metadata = option.get("metadata") or {}
-                metadata["dynamicChoices"] = "locales"
-                option["metadata"] = metadata
-            elif option.get("key") == "theme":
+            if option.get("key") == "theme":
                 option["choices"] = theme_choices
                 metadata = option.get("metadata") or {}
                 metadata["dynamicChoices"] = "themes"
@@ -256,38 +163,7 @@ def _validate_option_value(option: SettingOption, value: Any) -> Tuple[bool, Any
 
     if option.option_type == "select":
         dynamic = option.metadata.get("dynamicChoices") if isinstance(option.metadata, dict) else None
-        if dynamic == "locales":
-            available = _available_locale_codes()
-            allowed_map: Dict[str, str] = {}
-            for locale in available:
-                code = str(locale.get("code") or "").strip()
-                if not code:
-                    continue
-                allowed_map[code.lower()] = code
-                for name_key in ("name", "nativeName"):
-                    name_value = locale.get(name_key)
-                    if isinstance(name_value, str) and name_value.strip():
-                        allowed_map[name_value.strip().lower()] = code
-            candidate = str(value or "").strip()
-            try:
-                logger.log(
-                    "Project Nova: validating locale option "
-                    f"value={candidate!r}, allowed={sorted(set(allowed_map.values()))}"
-                )
-            except Exception:
-                pass
-            matched = allowed_map.get(candidate.lower())
-            if matched:
-                return True, matched, None
-            try:
-                logger.warn(
-                    f"Project Nova: invalid locale selection {value!r}; allowed codes "
-                    f"{sorted(set(allowed_map.values()))}"
-                )
-            except Exception:
-                pass
-            return False, option.default, "Value not in list of allowed options"
-        elif dynamic == "themes":
+        if dynamic == "themes":
             available = _available_theme_files()
             allowed_map: Dict[str, str] = {}
             for theme in available:
@@ -299,23 +175,9 @@ def _validate_option_value(option: SettingOption, value: Any) -> Tuple[bool, Any
                 if isinstance(label_value, str) and label_value.strip():
                     allowed_map[label_value.strip().lower()] = theme_value
             candidate = str(value or "").strip()
-            try:
-                logger.log(
-                    "Project Nova: validating theme option "
-                    f"value={candidate!r}, allowed={sorted(set(allowed_map.values()))}"
-                )
-            except Exception:
-                pass
             matched = allowed_map.get(candidate.lower())
             if matched:
                 return True, matched, None
-            try:
-                logger.warn(
-                    f"Project Nova: invalid theme selection {value!r}; allowed themes "
-                    f"{sorted(set(allowed_map.values()))}"
-                )
-            except Exception:
-                pass
             return False, option.default, "Value not in list of allowed options"
         else:
             allowed = {
@@ -325,12 +187,6 @@ def _validate_option_value(option: SettingOption, value: Any) -> Tuple[bool, Any
             }
             if str(value) in allowed:
                 return True, value, None
-            try:
-                logger.warn(
-                    f"Project Nova: invalid select option value {value!r}; allowed {sorted(allowed)}"
-                )
-            except Exception:
-                pass
             return False, option.default, "Value not in list of allowed options"
 
     # Fallback: accept any value
@@ -338,11 +194,7 @@ def _validate_option_value(option: SettingOption, value: Any) -> Tuple[bool, Any
 
 
 def init_settings() -> None:
-    """Eagerly load and cache settings (including language auto-detection).
-
-    Call during plugin boot, before Millennium.ready(), so the frontend
-    never has to fall back to a hardcoded default language.
-    """
+    """Eagerly load and cache settings."""
     with _SETTINGS_LOCK:
         _load_settings_cache()
 
@@ -356,24 +208,7 @@ def _load_settings_cache() -> Dict[str, Any]:
     version = raw_data.get("version", 0)
     values = raw_data.get("values")
 
-    first_launch = not values  # No saved settings yet
-
     merged_values = merge_defaults_with_values(values)
-
-    # On first launch, try to detect Steam's UI language from the registry
-    # instead of defaulting to 'en'.
-    if first_launch:
-        detected = _detect_steam_language()
-        if detected:
-            available_codes = {loc["code"] for loc in _available_locale_codes()}
-            if detected in available_codes:
-                merged_values.setdefault("general", {})["language"] = detected
-                logger.log(f"Project Nova: first launch, auto-selected language '{detected}'")
-            else:
-                logger.log(
-                    f"Project Nova: detected locale '{detected}' not available "
-                    f"(have: {sorted(available_codes)}), using default"
-                )
 
     if version != SCHEMA_VERSION or merged_values != values:
         _write_settings_file({"version": SCHEMA_VERSION, "values": merged_values})
@@ -385,60 +220,7 @@ def _get_values_locked() -> Dict[str, Any]:
     values = _load_settings_cache()
     if not isinstance(values, dict):
         values = {}
-    if _ensure_language_valid(values):
-        _persist_values(values)
     return values
-
-
-def _ensure_language_valid(values: Dict[str, Any]) -> bool:
-    general = values.get("general")
-    changed = False
-    if not isinstance(general, dict):
-        general = {}
-        values["general"] = general
-        changed = True
-
-    available_codes = {locale["code"] for locale in _available_locale_codes()}
-    available_codes.add(DEFAULT_LOCALE)
-
-    current_language = general.get("language")
-    if current_language not in available_codes:
-        logger.warn(
-            f"Project Nova: language '{current_language}' not available; "
-            f"falling back to {DEFAULT_LOCALE} (available={sorted(available_codes)})"
-        )
-        general["language"] = DEFAULT_LOCALE
-        changed = True
-    return changed
-
-
-def register_change_hook(option_path: Tuple[str, str], callback: Callable[[Any, Any], None]) -> None:
-    """Register a callback invoked when a particular option changes."""
-    with _SETTINGS_LOCK:
-        hooks = _CHANGE_HOOKS.setdefault(option_path, [])
-        hooks.append(callback)
-
-
-def get_settings_state() -> Dict[str, Any]:
-    """Return current schema, version and values for the frontend."""
-    with _SETTINGS_LOCK:
-        values = _get_values_locked()
-        return {
-            "version": SCHEMA_VERSION,
-            "values": copy.deepcopy(values),
-        }
-
-
-def get_current_language() -> str:
-    with _SETTINGS_LOCK:
-        values = _get_values_locked()
-        general = values.get("general") or {}
-        use_steam_lang = general.get("useSteamLanguage", True)
-        if use_steam_lang is not False:
-            detected = _detect_steam_language()
-            if detected:
-                return detected
-        return str(general.get("language") or DEFAULT_LOCALE)
 
 
 def get_morrenus_api_key() -> str:
@@ -449,55 +231,17 @@ def get_morrenus_api_key() -> str:
         return str(general.get("morrenusApiKey") or "")
 
 
-def get_available_locales() -> List[Dict[str, Any]]:
-    return _available_locale_codes()
-
-
 def get_settings_payload() -> Dict[str, Any]:
     with _SETTINGS_LOCK:
         values = _get_values_locked()
         values_snapshot = copy.deepcopy(values)
 
     schema = _inject_locale_choices(get_settings_schema())
-    locales = get_available_locales()
-    general = values_snapshot.get("general") or {}
-    use_steam_lang = general.get("useSteamLanguage", True)
-    if use_steam_lang is not False:
-        detected = _detect_steam_language()
-        available_codes = {loc["code"] for loc in locales}
-        if detected and detected in available_codes:
-            language = detected
-        else:
-            language = str(general.get("language") or DEFAULT_LOCALE)
-    else:
-        language = str(general.get("language") or DEFAULT_LOCALE)
-    translations = get_locale_manager().get_locale_strings(language)
 
     return {
         "version": SCHEMA_VERSION,
         "values": values_snapshot,
         "schema": schema,
-        "language": language,
-        "locales": locales,
-        "translations": translations,
-    }
-
-
-def get_translation_map(locale: Optional[str] = None) -> Dict[str, Any]:
-    manager = get_locale_manager()
-    locales = manager.available_locales()
-    codes = {item["code"] for item in locales}
-    codes.add(DEFAULT_LOCALE)
-
-    if locale not in codes:
-        locale = get_current_language()
-    if locale not in codes:
-        locale = DEFAULT_LOCALE
-
-    return {
-        "language": locale,
-        "locales": locales,
-        "strings": manager.get_locale_strings(locale),
     }
 
 
@@ -518,19 +262,11 @@ def apply_settings_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
                 errors.setdefault(group_key, {})["*"] = "Group payload must be an object"
                 continue
 
-            logger.log(f"Project Nova: applying group {group_key} with payload {options_changes}")
-
             if group_key not in updated:
                 errors.setdefault(group_key, {})["*"] = "Unknown settings group"
                 continue
 
             for option_key, value in options_changes.items():
-                try:
-                    logger.log(
-                        f"Project Nova: apply change request {group_key}.{option_key} -> {value!r}"
-                    )
-                except Exception:
-                    pass
                 option_lookup_key = (group_key, option_key)
                 option = _OPTION_LOOKUP.get(option_lookup_key)
                 if not option:
@@ -538,13 +274,6 @@ def apply_settings_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
                     continue
 
                 is_valid, normalised_value, error = _validate_option_value(option, value)
-                try:
-                    logger.log(
-                        f"Project Nova: validated {group_key}.{option_key}, "
-                        f"is_valid={is_valid}, normalised={normalised_value!r}, error={error}"
-                    )
-                except Exception:
-                    pass
                 if not is_valid:
                     errors.setdefault(group_key, {})[option_key] = error or "Invalid value"
                     continue
@@ -556,34 +285,21 @@ def apply_settings_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
                 updated[group_key][option_key] = normalised_value
                 applied_changes.append((option_lookup_key, previous_value, normalised_value))
 
-        language_changed = False
         if errors:
             return {"success": False, "errors": errors}
 
-        # Ensure language is still valid even if no change applied
-        if _ensure_language_valid(updated):
-            language_changed = True
-
-        if not applied_changes and not language_changed:
+        if not applied_changes:
             values_snapshot = copy.deepcopy(updated)
-            language = str(values_snapshot.get("general", {}).get("language") or DEFAULT_LOCALE)
-            translations = get_locale_manager().get_locale_strings(language)
-            logger.log(
-                f"Project Nova: no changes applied; returning cached values with language={language}"
-            )
             return {
                 "success": True,
                 "values": values_snapshot,
-                "language": language,
-                "translations": translations,
                 "message": "No-op",
             }
 
         _persist_values(updated)
         values_snapshot = copy.deepcopy(updated)
-        language = str(values_snapshot.get("general", {}).get("language") or DEFAULT_LOCALE)
 
-        # Invoke hooks outside of file write but still under lock to maintain order.
+        # Invoke hooks
         for option_key, previous, current_value in applied_changes:
             for callback in _CHANGE_HOOKS.get(option_key, []):
                 try:
@@ -591,14 +307,7 @@ def apply_settings_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
                 except Exception as exc:
                     logger.warn(f"Project Nova: settings hook failed for {option_key}: {exc}")
 
-        translations = get_locale_manager().get_locale_strings(language)
-
-        logger.log(
-            f"Project Nova: apply_settings_changes final language={language}, values={values_snapshot}"
-        )
         return {
             "success": True,
             "values": values_snapshot,
-            "language": language,
-            "translations": translations,
         }

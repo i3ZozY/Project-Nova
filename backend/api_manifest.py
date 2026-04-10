@@ -179,10 +179,7 @@ def load_api_manifest() -> List[Dict[str, Any]]:
 
 
 def get_api_list(content_script_query: str = "") -> str:
-    """Return the list of enabled API names for the frontend.
-
-    APIs requiring <moapikey> are hidden if the Morrenus API key is not configured.
-    """
+    """Return the list of enabled API names for the frontend."""
     try:
         apis = load_api_manifest()
         morrenus_api_key = get_morrenus_api_key()
