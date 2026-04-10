@@ -1,4 +1,4 @@
-# Project Nova Installer (Enhanced)
+# Project Nova Installer
 # Installs SteamTools, Millennium, and the Project Nova plugin.
 # Fully silent when -Silent is used. Now with better error handling and progress.
 
