@@ -24,7 +24,7 @@ from config import (
     WEB_UI_JS_FILE,
 )
 from http_client import ensure_http_client
-import httpx
+import httpx  # type: ignore
 from logger import logger
 from paths import backend_path, public_path
 from steam_utils import detect_steam_install_path, has_lua_for_app
@@ -382,7 +382,10 @@ def fetch_app_name(appid: int) -> str:
 
 
 def _process_and_install_lua(appid: int, zip_path: str) -> None:
+    """Process downloaded zip and install lua file into stplug-in directory."""
     import zipfile
+    import json
+    import re
 
     if _is_download_cancelled(appid):
         raise RuntimeError("cancelled")
@@ -394,6 +397,7 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
     with zipfile.ZipFile(zip_path, "r") as archive:
         names = archive.namelist()
 
+        # Extract .manifest files into depotcache
         try:
             depotcache_dir = os.path.join(base_path or "", "depotcache")
             os.makedirs(depotcache_dir, exist_ok=True)
@@ -413,6 +417,7 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
         except Exception as depot_exc:
             logger.warn(f"Project Nova: depotcache extraction failed: {depot_exc}")
 
+        # Find the numeric .lua file inside the zip
         candidates = []
         for name in names:
             pure = os.path.basename(name)
@@ -439,11 +444,25 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
         except Exception:
             text = data.decode("utf-8", errors="replace")
 
+        # ===== NEW: Parse addappid lines to collect depot info =====
+        depots = {"ids": [], "lines": {}}
         processed_lines = []
         for line in text.splitlines(True):
+            # Comment out setManifestid lines
             if re.match(r"^\s*setManifestid\(", line) and not re.match(r"^\s*--", line):
                 line = re.sub(r"^(\s*)", r"\1--", line)
             processed_lines.append(line)
+
+            # Extract depot IDs from addappid calls
+            if re.match(r"^\s*addappid\(", line) and not re.match(r"^\s*--", line):
+                match = re.search(r"addappid\s*\(\s*(\d+)", line)
+                if match:
+                    depot_id = match.group(1)
+                    depots["ids"].append(depot_id)
+                    if depot_id not in depots["lines"]:
+                        depots["lines"][depot_id] = []
+                    depots["lines"][depot_id].append(line)
+
         processed_text = "".join(processed_lines)
 
         set_download_state(appid, {"status": "installing"})
@@ -455,6 +474,64 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
         logger.log(f"Project Nova: Installed lua -> {dest_file}")
         set_download_state(appid, {"installedPath": dest_file})
 
+        # ===== NEW: Content Check (Workshop & DLC) =====
+        try:
+            if _is_download_cancelled(appid):
+                raise RuntimeError("cancelled")
+
+            # Fetch app info from SteamCMD API
+            client = ensure_http_client("Project Nova: content check")
+            url = f"https://api.steamcmd.net/v1/info/{appid}"
+            resp = client.get(url, follow_redirects=True, timeout=10)
+            resp.raise_for_status()
+            info_data = resp.json()
+            root = info_data.get("data", {}).get(str(appid), {})
+
+            # Workshop check
+            workshop_depot = str(root.get("depots", {}).get("workshopdepot", "0"))
+            if workshop_depot == "0":
+                workshop_result = "No workshop for the game"
+            else:
+                # Check if workshop depot appears in addappid lines AND includes a decryption key
+                if workshop_depot in depots["ids"]:
+                    # Look for a decryption key pattern in the corresponding lines
+                    has_key = False
+                    for line in depots["lines"].get(workshop_depot, []):
+                        # Decryption key is typically a quoted string after two numbers
+                        if re.search(r",\s*\d+\s*,\s*\"[a-fA-F0-9]+\"", line):
+                            has_key = True
+                            break
+                    workshop_result = "Included" if has_key else "Missing"
+                else:
+                    workshop_result = "Missing"
+
+            # DLC check
+            dlc_list_str = root.get("extended", {}).get("listofdlc", "")
+            dlc_result = {"included": [], "missing": []}
+            if dlc_list_str:
+                dlc_ids = dlc_list_str.split(",")
+                for dlc_id in dlc_ids:
+                    dlc_id = dlc_id.strip()
+                    if dlc_id in depots["ids"]:
+                        dlc_result["included"].append(int(dlc_id))
+                    else:
+                        dlc_result["missing"].append(int(dlc_id))
+
+            set_download_state(appid, {
+                "status": "done",
+                "contentCheckResult": {
+                    "workshop": workshop_result,
+                    "dlc": dlc_result
+                }
+            })
+            logger.log(f"Project Nova: Content check completed for {appid}: workshop={workshop_result}, dlc included={len(dlc_result['included'])} missing={len(dlc_result['missing'])}")
+
+        except Exception as exc:
+            logger.error(f"Project Nova: Content check failed for {appid}: {exc}")
+            # Still mark as done, but without content check results
+            set_download_state(appid, {"status": "done"})
+
+    # Clean up the downloaded zip
     try:
         os.remove(zip_path)
     except Exception:
@@ -495,6 +572,10 @@ def _download_zip_for_app(appid: int):
     morrenus_api_key = get_morrenus_api_key()
 
     for api in apis:
+        if _is_download_cancelled(appid):
+            logger.log(f"Project Nova: Download cancelled before API '{api.get('name')}'")
+            return
+
         name = api.get("name", "Unknown")
         template = api.get("url", "")
         success_code = int(api.get("success_code", 200))
@@ -517,6 +598,10 @@ def _download_zip_for_app(appid: int):
 
             # Retry up to 2 times per API for timeouts
             for attempt in range(2):
+                if _is_download_cancelled(appid):
+                    logger.log(f"Project Nova: Download cancelled during retry loop for API '{name}'")
+                    return
+
                 try:
                     with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=30) as resp:
                         code = resp.status_code
@@ -531,6 +616,12 @@ def _download_zip_for_app(appid: int):
                             break
                         total = int(resp.headers.get("Content-Length", "0") or "0")
                         set_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": total})
+                        
+                        # Check cancellation before writing file
+                        if _is_download_cancelled(appid):
+                            logger.log(f"Project Nova: Download cancelled before writing file for appid={appid}")
+                            raise RuntimeError("cancelled")
+                            
                         with open(dest_path, "wb") as output:
                             for chunk in resp.iter_bytes():
                                 if not chunk:
@@ -624,6 +715,16 @@ def _download_zip_for_app(appid: int):
                         set_download_state(appid, {"apiErrors": api_errors})
                     else:
                         continue
+                except RuntimeError as cancel_exc:
+                    if str(cancel_exc) == "cancelled":
+                        try:
+                            if os.path.exists(dest_path):
+                                os.remove(dest_path)
+                        except Exception:
+                            pass
+                        logger.log(f"Project Nova: Download cancelled and cleaned up for appid={appid}")
+                        return
+                    raise
                 except Exception as err:
                     logger.warn(f"Project Nova: API '{name}' failed with error: {err}")
                     error_type = "timeout" if isinstance(err, (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout)) else "error"
@@ -653,11 +754,9 @@ def _download_zip_for_app(appid: int):
             set_download_state(appid, {"status": "failed", "error": str(cancel_exc)})
             return
         except Exception as err:
-            # Already handled inside loop, but catch any unhandled
             continue
 
     set_download_state(appid, {"status": "failed", "error": "Not available on any API"})
-
 
 def start_add_via_projectnova(appid: int) -> str:
     try:

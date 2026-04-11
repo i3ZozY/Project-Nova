@@ -31,14 +31,6 @@ SETTINGS_GROUPS: List[SettingGroup] = [
         description="Global Project Nova preferences.",
         options=[
             SettingOption(
-                key="theme",
-                label="Theme",
-                option_type="select",
-                description="Choose the color theme for Project Nova interface.",
-                default="original",
-                metadata={"dynamicChoices": "themes"},
-            ),
-            SettingOption(
                 key="fastDownload",
                 label="Fast Download",
                 option_type="toggle",

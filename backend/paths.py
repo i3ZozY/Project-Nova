@@ -19,6 +19,10 @@ def backend_path(filename: str) -> str:
     return os.path.join(get_backend_dir(), filename)
 
 
-def public_path(filename: str) -> str:
-    """Return an absolute path to a file inside the public directory."""
-    return os.path.join(get_plugin_dir(), "public", filename)
+def frontend_path(filename: str) -> str:
+    """Return an absolute path to a file inside the frontend directory."""
+    return os.path.join(get_plugin_dir(), "frontend", filename)
+
+
+# Keep the old name for backward compatibility if needed
+public_path = frontend_path

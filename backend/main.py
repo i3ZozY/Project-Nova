@@ -57,7 +57,7 @@ from fixes import (
 from utils import ensure_temp_download_dir
 from http_client import close_http_client, ensure_http_client
 from logger import logger as shared_logger
-from paths import get_plugin_dir, public_path
+from paths import get_plugin_dir, frontend_path
 from settings.manager import (
     apply_settings_changes,
     get_settings_payload,
@@ -79,11 +79,6 @@ MANIFEST_UPDATER_LOCK = threading.Lock()
 
 
 def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", manifesthubKey="", hideWindow=True, **kwargs):
-    """
-    Called from frontend to start the manifest updater.
-    Accepts keyword arguments: appid, mode, morrenusKey, manifesthubKey, hideWindow.
-    """
-    # Handle legacy call where args are passed as a dict
     if appid is None and kwargs.get('args'):
         args = kwargs['args']
         if isinstance(args, dict):
@@ -91,90 +86,49 @@ def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", 
             mode = args.get('mode', 'github')
             morrenusKey = args.get('morrenusKey', '')
             manifesthubKey = args.get('manifesthubKey', '')
-    
+
     if not appid or not str(appid).isdigit():
         logger.error(f"Invalid AppID: {appid}")
         return json.dumps({"success": False, "error": "Valid numeric App ID required"})
-    
+
     with MANIFEST_UPDATER_LOCK:
         MANIFEST_UPDATER_STATE["status"] = "running"
         MANIFEST_UPDATER_STATE["output"] = ""
         MANIFEST_UPDATER_STATE["error"] = None
         MANIFEST_UPDATER_STATE["appid"] = appid
 
-    def run_script():
-        plugin_root = get_plugin_dir()
-        script_path = os.path.join(plugin_root, "manifests.ps1")
-        logger.log(f"Looking for manifest script at: {script_path}")
-        if not os.path.exists(script_path):
-            with MANIFEST_UPDATER_LOCK:
-                MANIFEST_UPDATER_STATE["status"] = "error"
-                MANIFEST_UPDATER_STATE["error"] = f"manifests.ps1 not found at {script_path}"
-            return
-
-        # Build command in correct order
-        cmd = [
-            "powershell.exe",
-            "-ExecutionPolicy", "Bypass"
-        ]
-        if hideWindow:
-            cmd.extend(["-WindowStyle", "Hidden"])
-        cmd.extend([
-            "-File", script_path,
-            "-AppId", str(appid),
-            "-Mode", mode
-        ])
-        if morrenusKey:
-            cmd.extend(["-MorrenusApiKey", morrenusKey])
-        if manifesthubKey:
-            cmd.extend(["-ManifestHubApiKey", manifesthubKey])
-
-        logger.log(f"Running command: {' '.join(cmd)}")
-
+    def run_update():
         try:
-            creationflags = subprocess.CREATE_NO_WINDOW if hideWindow else 0
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                creationflags=creationflags,
-                cwd=plugin_root
-            )
-            output_lines = []
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    output_lines.append(line)
-                    with MANIFEST_UPDATER_LOCK:
-                        MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-50:])
-                    logger.log(f"[MANIFEST] {line.strip()}")
-            process.wait()
-            exit_code = process.returncode
-            logger.log(f"Manifest script exited with code {exit_code}")
+            from manifests import run_manifest_update  # noqa: F401  # pylance: ignore
+            import io
+            from contextlib import redirect_stdout
 
-            if exit_code == 0:
-                with MANIFEST_UPDATER_LOCK:
+            f = io.StringIO()
+            with redirect_stdout(f):
+                result = manifests.run_manifest_update(str(appid), mode, morrenusKey, manifesthubKey)
+            output = f.getvalue()
+            logger.log(f"Manifest updater output:\n{output}")
+
+            with MANIFEST_UPDATER_LOCK:
+                MANIFEST_UPDATER_STATE["output"] = output
+                if result.get("success"):
                     MANIFEST_UPDATER_STATE["status"] = "done"
-                    MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
-            else:
-                with MANIFEST_UPDATER_LOCK:
+                else:
                     MANIFEST_UPDATER_STATE["status"] = "error"
-                    MANIFEST_UPDATER_STATE["error"] = f"Script exited with code {exit_code}. Check logs for details."
-                    MANIFEST_UPDATER_STATE["output"] = "".join(output_lines[-100:])
+                    MANIFEST_UPDATER_STATE["error"] = result.get("error", "Update failed.")
         except Exception as e:
             logger.error(f"Manifest updater exception: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             with MANIFEST_UPDATER_LOCK:
                 MANIFEST_UPDATER_STATE["status"] = "error"
                 MANIFEST_UPDATER_STATE["error"] = str(e)
 
-    threading.Thread(target=run_script, daemon=True).start()
+    threading.Thread(target=run_update, daemon=True).start()
     return json.dumps({"success": True, "message": "Manifest updater started"})
 
 
 def get_manifest_updater_status(**kwargs):
-    """Return current status for frontend polling."""
     with MANIFEST_UPDATER_LOCK:
         return json.dumps({
             "success": True,
@@ -216,7 +170,7 @@ def _copy_webkit_files() -> None:
     steam_ui_path = _steam_ui_path()
     os.makedirs(steam_ui_path, exist_ok=True)
 
-    js_src = public_path(WEB_UI_JS_FILE)
+    js_src = frontend_path(WEB_UI_JS_FILE)
     js_dst = os.path.join(steam_ui_path, WEB_UI_JS_FILE)
     logger.log(f"Copying Project Nova web UI from {js_src} to {js_dst}")
     try:
@@ -224,7 +178,8 @@ def _copy_webkit_files() -> None:
     except Exception as exc:
         logger.error(f"Failed to copy Project Nova web UI: {exc}")
 
-    icon_src = public_path(WEB_UI_ICON_FILE)
+    # Icon is now inside frontend/icons/
+    icon_src = os.path.join(plugin_dir, "frontend", "icons", WEB_UI_ICON_FILE)
     icon_dst = os.path.join(steam_ui_path, WEB_UI_ICON_FILE)
     if os.path.exists(icon_src):
         try:
@@ -236,7 +191,7 @@ def _copy_webkit_files() -> None:
         logger.warn(f"Project Nova icon not found at {icon_src}")
 
     # Copy theme CSS files
-    themes_src = os.path.join(plugin_dir, "public", "themes")
+    themes_src = os.path.join(plugin_dir, "frontend", "themes")
     themes_dst = os.path.join(steam_ui_path, "themes")
     if os.path.exists(themes_src):
         try:
@@ -400,7 +355,7 @@ def GetSettingsConfig(contentScriptQuery: str = "") -> str:
 
 def GetThemes(contentScriptQuery: str = "") -> str:
     try:
-        themes_path = os.path.join(get_plugin_dir(), 'public', 'themes', 'themes.json')
+        themes_path = os.path.join(get_plugin_dir(), 'frontend', 'themes', 'themes.json')
         if os.path.exists(themes_path):
             try:
                 with open(themes_path, 'r', encoding='utf-8') as fh:
@@ -487,20 +442,17 @@ def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") ->
     validates it, and installs it into the stplug-in folder.
     """
     try:
-        # Decode base64
         file_data = base64.b64decode(content)
     except Exception as e:
         logger.error(f"ImportGameFile base64 decode failed: {e}")
         return json.dumps({"success": False, "error": "Invalid file data (base64 decode failed)"})
 
-    # Determine file type
     is_lua = filename.lower().endswith(".lua")
     is_zip = filename.lower().endswith(".zip")
 
     if not (is_lua or is_zip):
         return json.dumps({"success": False, "error": "Only .lua or .zip files are supported"})
 
-    # Save to a temporary file
     suffix = os.path.splitext(filename)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_data)
@@ -508,14 +460,12 @@ def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") ->
 
     try:
         if is_lua:
-            # Direct .lua file: extract appid from filename (e.g., "730.lua")
             base = os.path.basename(filename)
             appid_str = os.path.splitext(base)[0]
             if not appid_str.isdigit():
                 return json.dumps({"success": False, "error": "Lua filename must be numeric (e.g., 730.lua)"})
             appid = int(appid_str)
 
-            # Install directly to stplug-in
             base_path = detect_steam_install_path() or Millennium.steam_path()
             target_dir = os.path.join(base_path, "config", "stplug-in")
             os.makedirs(target_dir, exist_ok=True)
@@ -523,16 +473,13 @@ def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") ->
             shutil.copy(tmp_path, dest)
             logger.log(f"Imported lua file -> {dest}")
 
-            # Record addition
             name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
             _append_loaded_app(appid, name)
             _log_appid_event("IMPORTED (LUA)", appid, name)
             return json.dumps({"success": True, "appid": appid, "name": name})
 
         elif is_zip:
-            # ZIP file: must contain a numeric .lua file inside
             with zipfile.ZipFile(tmp_path, 'r') as zf:
-                # Find the first .lua file with a numeric name
                 lua_candidates = [
                     name for name in zf.namelist()
                     if name.lower().endswith('.lua') and os.path.basename(name).split('.')[0].isdigit()
@@ -540,19 +487,14 @@ def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") ->
                 if not lua_candidates:
                     return json.dumps({"success": False, "error": "No valid numeric .lua file found inside the ZIP"})
 
-                # Use the first candidate
                 lua_name = lua_candidates[0]
                 appid = int(os.path.basename(lua_name).split('.')[0])
 
-                # Extract the .lua file to a temp location, then call the standard installer
                 temp_lua = tempfile.NamedTemporaryFile(delete=False, suffix=".lua")
                 temp_lua.write(zf.read(lua_name))
                 temp_lua.close()
 
-                # Use the existing processing function (it also extracts manifests)
                 _process_and_install_lua(appid, temp_lua.name)
-
-                # Clean up temp lua
                 os.unlink(temp_lua.name)
 
             name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
@@ -564,7 +506,6 @@ def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") ->
         logger.error(f"ImportGameFile error: {e}")
         return json.dumps({"success": False, "error": str(e)})
     finally:
-        # Clean up the uploaded temp file
         try:
             os.unlink(tmp_path)
         except Exception:
