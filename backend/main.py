@@ -5,6 +5,9 @@ import sys
 import threading
 import webbrowser
 import subprocess
+import base64
+import tempfile
+import zipfile
 
 from typing import Any
 
@@ -37,6 +40,10 @@ from downloads import (
     init_applist,
     read_loaded_apps,
     start_add_via_projectnova,
+    _process_and_install_lua,
+    _append_loaded_app,
+    _log_appid_event,
+    _fetch_app_name,
 )
 from fixes import (
     apply_game_fix,
@@ -74,7 +81,9 @@ MANIFEST_UPDATER_LOCK = threading.Lock()
 def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", manifesthubKey="", hideWindow=True, **kwargs):
     """
     Called from frontend to start the manifest updater.
+    Accepts keyword arguments: appid, mode, morrenusKey, manifesthubKey, hideWindow.
     """
+    # Handle legacy call where args are passed as a dict
     if appid is None and kwargs.get('args'):
         args = kwargs['args']
         if isinstance(args, dict):
@@ -82,11 +91,11 @@ def run_manifest_updater_interactive(appid=None, mode="github", morrenusKey="", 
             mode = args.get('mode', 'github')
             morrenusKey = args.get('morrenusKey', '')
             manifesthubKey = args.get('manifesthubKey', '')
-
+    
     if not appid or not str(appid).isdigit():
         logger.error(f"Invalid AppID: {appid}")
         return json.dumps({"success": False, "error": "Valid numeric App ID required"})
-
+    
     with MANIFEST_UPDATER_LOCK:
         MANIFEST_UPDATER_STATE["status"] = "running"
         MANIFEST_UPDATER_STATE["output"] = ""
@@ -469,6 +478,97 @@ def ApplySettingsChanges(
     except Exception as exc:
         logger.warn(f"Project Nova: ApplySettingsChanges failed: {exc}")
         return json.dumps({"success": False, "error": str(exc)})
+
+
+# ========================== Import Game Files (Drag & Drop) ==========================
+def ImportGameFile(content: str, filename: str, contentScriptQuery: str = "") -> str:
+    """
+    Receives a base64-encoded .lua or .zip file from the frontend,
+    validates it, and installs it into the stplug-in folder.
+    """
+    try:
+        # Decode base64
+        file_data = base64.b64decode(content)
+    except Exception as e:
+        logger.error(f"ImportGameFile base64 decode failed: {e}")
+        return json.dumps({"success": False, "error": "Invalid file data (base64 decode failed)"})
+
+    # Determine file type
+    is_lua = filename.lower().endswith(".lua")
+    is_zip = filename.lower().endswith(".zip")
+
+    if not (is_lua or is_zip):
+        return json.dumps({"success": False, "error": "Only .lua or .zip files are supported"})
+
+    # Save to a temporary file
+    suffix = os.path.splitext(filename)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_data)
+        tmp_path = tmp.name
+
+    try:
+        if is_lua:
+            # Direct .lua file: extract appid from filename (e.g., "730.lua")
+            base = os.path.basename(filename)
+            appid_str = os.path.splitext(base)[0]
+            if not appid_str.isdigit():
+                return json.dumps({"success": False, "error": "Lua filename must be numeric (e.g., 730.lua)"})
+            appid = int(appid_str)
+
+            # Install directly to stplug-in
+            base_path = detect_steam_install_path() or Millennium.steam_path()
+            target_dir = os.path.join(base_path, "config", "stplug-in")
+            os.makedirs(target_dir, exist_ok=True)
+            dest = os.path.join(target_dir, f"{appid}.lua")
+            shutil.copy(tmp_path, dest)
+            logger.log(f"Imported lua file -> {dest}")
+
+            # Record addition
+            name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
+            _append_loaded_app(appid, name)
+            _log_appid_event("IMPORTED (LUA)", appid, name)
+            return json.dumps({"success": True, "appid": appid, "name": name})
+
+        elif is_zip:
+            # ZIP file: must contain a numeric .lua file inside
+            with zipfile.ZipFile(tmp_path, 'r') as zf:
+                # Find the first .lua file with a numeric name
+                lua_candidates = [
+                    name for name in zf.namelist()
+                    if name.lower().endswith('.lua') and os.path.basename(name).split('.')[0].isdigit()
+                ]
+                if not lua_candidates:
+                    return json.dumps({"success": False, "error": "No valid numeric .lua file found inside the ZIP"})
+
+                # Use the first candidate
+                lua_name = lua_candidates[0]
+                appid = int(os.path.basename(lua_name).split('.')[0])
+
+                # Extract the .lua file to a temp location, then call the standard installer
+                temp_lua = tempfile.NamedTemporaryFile(delete=False, suffix=".lua")
+                temp_lua.write(zf.read(lua_name))
+                temp_lua.close()
+
+                # Use the existing processing function (it also extracts manifests)
+                _process_and_install_lua(appid, temp_lua.name)
+
+                # Clean up temp lua
+                os.unlink(temp_lua.name)
+
+            name = _fetch_app_name(appid) or f"UNKNOWN ({appid})"
+            _append_loaded_app(appid, name)
+            _log_appid_event("IMPORTED (ZIP)", appid, name)
+            return json.dumps({"success": True, "appid": appid, "name": name})
+
+    except Exception as e:
+        logger.error(f"ImportGameFile error: {e}")
+        return json.dumps({"success": False, "error": str(e)})
+    finally:
+        # Clean up the uploaded temp file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 # ========================== Plugin Lifecycle ==========================

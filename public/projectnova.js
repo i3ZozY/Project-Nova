@@ -1,4 +1,4 @@
-// Project Nova – Enhanced Frontend
+// Project Nova – Enhanced Frontend (Final)
 // ============================================================
 
 (function () {
@@ -100,63 +100,127 @@
             .catch(() => null);
     }
 
-    // Task 5 & 6: Multiple CDN image URL helpers with broad fallback chains
+    // ========================== Robust Image Loading (Handles ORB Blocking) ==========================
+
     function getCDNUrl(appid, type) {
         return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/${type}`;
     }
-    function getGameImageFallbacks(appid) {
-        // Ordered from best to worst — covers virtually every game on Steam
-        return [
-            getCDNUrl(appid, 'header.jpg'),
-            getCDNUrl(appid, 'capsule_616x353.jpg'),
-            getCDNUrl(appid, 'capsule_231x87.jpg'),
-            getCDNUrl(appid, 'capsule_sm_120.jpg'),
-            getCDNUrl(appid, 'capsule_467x181.jpg'),
-            getCDNUrl(appid, 'page_bg_generated_v6b.jpg'),
-            getCDNUrl(appid, 'logo.png'),
-        ];
-    }
-    function getGameBannerFallbacks(appid) {
-        return [
-            getCDNUrl(appid, 'header.jpg'),
-            getCDNUrl(appid, 'capsule_616x353.jpg'),
-            getCDNUrl(appid, 'capsule_231x87.jpg'),
-            getCDNUrl(appid, 'capsule_sm_120.jpg'),
-        ];
-    }
-    function getGameBgFallbacks(appid) {
-        return [
-            getCDNUrl(appid, 'library_hero.jpg'),
-            getCDNUrl(appid, 'page_bg_generated_v6b.jpg'),
-            getCDNUrl(appid, 'header.jpg'),
-        ];
+
+    const steamImageCache = {};
+
+    function fetchSteamStoreImages(appid) {
+        if (steamImageCache[appid]) {
+            return Promise.resolve(steamImageCache[appid]);
+        }
+        return fetch(`https://store.steampowered.com/api/appdetails?appids=${appid}&filters=basic`)
+            .then(r => r.json())
+            .then(d => {
+                const data = d[appid]?.data;
+                if (data) {
+                    const urls = {
+                        header: data.header_image,
+                        capsule: data.capsule_image,
+                        background: data.background,
+                    };
+                    steamImageCache[appid] = urls;
+                    return urls;
+                }
+                return {};
+            })
+            .catch(() => ({}));
     }
 
-    // Task 3 & 5: Image helper — uses object-fit: contain so logo never crops
-    function makeImgWithFallback(src, style, fallbacks) {
-        const img = document.createElement('img');
-        img.src = src;
-        img.style.cssText = style;
-        const chain = fallbacks ? [...fallbacks] : [];
-        img.onerror = function () {
-            if (chain.length > 0) {
-                img.src = chain.shift();
-            } else {
-                img.style.display = 'none';
-            }
+    // Load image: tries Steam API first (reliable), then falls back to CDN (may be blocked)
+    function loadImageWithFallbacks(imgElement, appid, preferredType, fallbackTypes, style) {
+        imgElement.style.cssText = style;
+
+        const tryCdn = () => {
+            const cdnUrls = fallbackTypes.map(type => getCDNUrl(appid, type));
+            let cdnIndex = 0;
+            const nextCdn = () => {
+                if (cdnIndex < cdnUrls.length) {
+                    imgElement.src = cdnUrls[cdnIndex];
+                    cdnIndex++;
+                } else {
+                    imgElement.style.display = 'none';
+                }
+            };
+            imgElement.onerror = nextCdn;
+            nextCdn();
         };
+
+        // Try API first
+        fetchSteamStoreImages(appid).then(apiUrls => {
+            let apiUrl = null;
+            if (preferredType === 'header' || preferredType.includes('header')) {
+                apiUrl = apiUrls.header;
+            } else if (preferredType === 'capsule' || preferredType.includes('capsule')) {
+                apiUrl = apiUrls.capsule;
+            }
+            if (!apiUrl) apiUrl = apiUrls.header || apiUrls.capsule || apiUrls.background;
+            
+            if (apiUrl) {
+                imgElement.src = apiUrl;
+                imgElement.onerror = () => { tryCdn(); };
+            } else {
+                tryCdn();
+            }
+        }).catch(() => {
+            tryCdn();
+        });
+    }
+
+    function makeImgWithFallback(appid, preferredType, fallbackTypes, style) {
+        const img = document.createElement('img');
+        loadImageWithFallbacks(img, appid, preferredType, fallbackTypes, style);
         return img;
     }
 
-    // Game thumbnail that shows the full image without clipping
     function makeGameThumb(appid, width, height, radius) {
-        const fallbacks = getGameImageFallbacks(appid);
-        const first = fallbacks.shift();
         return makeImgWithFallback(
-            first,
-            `width:${width}px;height:${height}px;border-radius:${radius}px;object-fit:contain;background:#0a0a1a;border:1px solid rgba(168,85,247,0.25);`,
-            fallbacks
+            appid,
+            'capsule',
+            ['capsule_sm_120.jpg', 'capsule_231x87.jpg', 'header.jpg', 'logo.png'],
+            `max-width:${width}px;max-height:${height}px;width:auto;height:auto;border-radius:${radius}px;object-fit:contain;background:#0a0a1a;border:1px solid rgba(168,85,247,0.25);`
         );
+    }
+
+    function getBestBackgroundUrl(appid) {
+        return new Promise((resolve) => {
+            fetchSteamStoreImages(appid).then(api => {
+                // Prefer header image for background (matches banner)
+                const bgUrl = api.header || api.background || api.capsule;
+                if (bgUrl) return resolve(bgUrl);
+                
+                // Try CDN fallbacks – prioritize header.jpg
+                const img = new Image();
+                img.onload = () => resolve(getCDNUrl(appid, 'header.jpg'));
+                img.onerror = () => {
+                    const fbImg = new Image();
+                    fbImg.onload = () => resolve(getCDNUrl(appid, 'capsule_616x353.jpg'));
+                    fbImg.onerror = () => {
+                        const fbImg2 = new Image();
+                        fbImg2.onload = () => resolve(getCDNUrl(appid, 'page_bg_generated_v6b.jpg'));
+                        fbImg2.onerror = () => {
+                            fetch(`https://store.steampowered.com/api/appdetails?appids=${appid}&filters=basic`)
+                                .then(r => r.json())
+                                .then(d => {
+                                    const data = d[appid]?.data;
+                                    if (data?.header_image) {
+                                        resolve(data.header_image);
+                                    } else {
+                                        resolve(null);
+                                    }
+                                })
+                                .catch(() => resolve(null));
+                        };
+                        fbImg2.src = getCDNUrl(appid, 'page_bg_generated_v6b.jpg');
+                    };
+                    fbImg.src = getCDNUrl(appid, 'capsule_616x353.jpg');
+                };
+                img.src = getCDNUrl(appid, 'header.jpg');
+            }).catch(() => resolve(null));
+        });
     }
 
     function fetchGamesDatabase() {
@@ -194,9 +258,9 @@
         return match ? parseInt(match[1], 10) : null;
     }
 
-// ========================== Theme Styles ==========================
-function generateThemeStyles() {
-    return `
+    // ========================== Theme Styles ==========================
+    function generateThemeStyles() {
+        return `
         /* Prevent horizontal scrollbar globally */
         body, html {
             overflow-x: hidden !important;
@@ -262,6 +326,13 @@ function generateThemeStyles() {
             from { opacity: 1; transform: scale(1); }
             to   { opacity: 0; transform: scale(0.96); }
         }
+        
+        .pn-modal .pn-game-fixer-bg-box {
+            transition: border-color 0.2s ease;
+        }
+        .pn-modal .pn-game-fixer-bg-box:hover {
+            border-color: #c084fc;
+        }
 
         /* ===== Modal ===== */
         .pn-modal {
@@ -284,6 +355,8 @@ function generateThemeStyles() {
             overflow: visible !important;
             transform: translateZ(0);
             will-change: transform;
+            background-size: cover;
+            background-position: center top;
         }
 
         .pn-modal-header {
@@ -327,7 +400,7 @@ function generateThemeStyles() {
             color: ${NOVA.accentLight};
             font-size: 16px;
             text-decoration: none;
-            transition: background 0.25s ease, border-color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease, color 0.25s ease;
+            transition: background 0.25s ease, border-color 0.25s ease, transform 0.28s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, color 0.25s ease;
             cursor: pointer;
             flex-shrink: 0;
         }
@@ -371,7 +444,7 @@ function generateThemeStyles() {
                 border-color 0.25s ease,
                 box-shadow 0.25s ease,
                 color 0.25s ease,
-                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+                transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
             cursor: pointer;
             display: inline-flex;
             align-items: center;
@@ -392,10 +465,6 @@ function generateThemeStyles() {
             box-shadow: 0 6px 18px rgba(168,85,247,0.4);
             color: #fff;
             z-index: 20;
-        }
-        .pn-btn:active:not([data-disabled="1"]) {
-            transform: scale(0.98);
-            box-shadow: 0 2px 6px rgba(168,85,247,0.2);
         }
         .pn-btn.primary {
             background: ${NOVA.gradient};
@@ -450,7 +519,7 @@ function generateThemeStyles() {
             transition:
                 background 0.25s ease,
                 border-color 0.25s ease,
-                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+                transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
                 box-shadow 0.25s ease;
             margin-bottom: 10px;
             text-decoration: none;
@@ -469,10 +538,6 @@ function generateThemeStyles() {
             box-shadow: 0 8px 28px rgba(168,85,247,0.25);
             z-index: 15;
         }
-        .pn-card:active {
-            transform: translateX(1px) scale(0.99);
-            box-shadow: 0 4px 12px rgba(168,85,247,0.15);
-        }
         .pn-card-icon {
             width: 44px;
             height: 44px;
@@ -485,7 +550,7 @@ function generateThemeStyles() {
             font-size: 18px;
             color: ${NOVA.accentLight};
             flex-shrink: 0;
-            transition: background 0.25s ease, border-color 0.25s ease, transform 0.25s ease;
+            transition: background 0.25s ease, border-color 0.25s ease, transform 0.28s cubic-bezier(0.34,1.56,0.64,1);
         }
         .pn-card:hover .pn-card-icon {
             background: rgba(168,85,247,0.22);
@@ -655,7 +720,7 @@ function generateThemeStyles() {
             border: 1px solid rgba(168,85,247,0.2);
             border-radius: 14px;
             margin-bottom: 10px;
-            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.28s cubic-bezier(0.34,1.56,0.64,1);
             will-change: transform;
             transform: translateZ(0);
             backface-visibility: hidden;
@@ -668,7 +733,7 @@ function generateThemeStyles() {
             z-index: 5;
         }
 
-        /* ===== Header Button (WITH SUBTLE SCALING) ===== */
+        /* ===== Header Button ===== */
         .projectnova-header-button {
             display: inline-flex !important;
             align-items: center !important;
@@ -686,7 +751,7 @@ function generateThemeStyles() {
             line-height: 1 !important;
             align-self: center !important;
             flex-shrink: 0 !important;
-            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s cubic-bezier(0.34,1.56,0.64,1) !important;
+            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.28s cubic-bezier(0.34,1.56,0.64,1) !important;
             box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
             text-decoration: none !important;
             position: relative !important;
@@ -703,11 +768,8 @@ function generateThemeStyles() {
             transform: scale(1.08) !important;
             z-index: 10 !important;
         }
-        .projectnova-header-button:active {
-            transform: scale(0.95) !important;
-        }
 
-        /* ===== Steam page injected buttons (WITH SUBTLE SCALING) ===== */
+        /* ===== Steam page injected buttons ===== */
         a.projectnova-button,
         a.projectnova-restart-button,
         a.projectnova-remove-button {
@@ -716,7 +778,7 @@ function generateThemeStyles() {
                 border-color 0.25s ease,
                 box-shadow 0.25s ease,
                 color 0.25s ease,
-                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+                transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
             will-change: transform;
             transform: translateZ(0);
             backface-visibility: hidden;
@@ -810,7 +872,7 @@ function generateThemeStyles() {
         .pn-mt-4      { margin-top: 16px; }
         .pn-mb-4      { margin-bottom: 16px; }
     `;
-}
+    }
 
     function ensureNovaTheme() {
         const existing = document.getElementById('projectnova-theme-styles');
@@ -1029,7 +1091,6 @@ function generateThemeStyles() {
             }
 
             body.appendChild(createSection('Game'));
-            // Task 7: Renamed "Fixes Menu" → "Game Fixer"
             body.appendChild(createCard('fa-wrench', 'Game Fixer', 'Apply or manage game fixes', () => {
                 if (onAppPage) {
                     Millennium.callServerMethod('projectnova', 'GetGameInstallPath', { appid: currentAppid })
@@ -1052,10 +1113,8 @@ function generateThemeStyles() {
                 }
             }));
 
-            // Task 8: Renamed "Remove via Project Nova" → "Remove added games"
             body.appendChild(createCard('fa-trash-can', 'Remove added games', 'Remove a game that was added through Project Nova', () => {
                 if (onAppPage) {
-                    // Task 21: Always check if game is actually added before showing remove confirm
                     Millennium.callServerMethod('projectnova', 'HasProjectNovaForApp', { appid: currentAppid })
                         .then(res => {
                             const p = typeof res === 'string' ? JSON.parse(res) : res;
@@ -1085,12 +1144,9 @@ function generateThemeStyles() {
             }));
 
             body.appendChild(createSection('Tools'));
-            // Task 9: Renamed "Add a Game via Project Nova" → "Add a game to your library"
             body.appendChild(createCard('fa-hashtag', 'Add a game to your library', 'Add any game to your library through Project Nova', () => showAddByAppIdPopup(() => showSettingsPopup())));
-            // Task 11: "Installed Games" → "Manage Installed Games" in title
-            // Task 10: Updated description
+                        body.appendChild(createCard('fa-upload', 'Import Game Files', 'Drag & drop or select .lua or .zip files to add games', () => showImportFilesModal(() => showSettingsPopup())));
             body.appendChild(createCard('fa-list', 'Manage Installed Games', 'View, manage, or remove games and their fixes added with Project Nova', () => showInstalledGamesPopup(() => showSettingsPopup())));
-            // Task 13: Renamed "Fetch Free APIs" → "Fetch API Sources"
             body.appendChild(createCard('fa-server', 'Fetch API Sources', 'Fetch and update API sources', () => {
                 Millennium.callServerMethod('projectnova', 'FetchFreeApisNow', {})
                     .then(res => {
@@ -1102,7 +1158,6 @@ function generateThemeStyles() {
                         }
                     });
             }));
-            // Task 14: Updated manifest description
             body.appendChild(createCard('fa-download', 'Manifest Updater', 'Update Steam depot manifests and resolve issues such as "No Internet Connection"', () => showManifestUpdaterModal(() => showSettingsPopup())));
 
             body.appendChild(createSection('Settings'));
@@ -1147,6 +1202,124 @@ function generateThemeStyles() {
         }, null, { isMainMenu: true });
     }
 
+    // import games files
+        function showImportFilesModal(backFn) {
+        createModal('Import Game Files', (body, overlay) => {
+            body.style.textAlign = 'left';
+            body.innerHTML = `
+                <div class="pn-info-box"><i class="fa-solid fa-cloud-upload" style="margin-right:8px;"></i>Drag and drop a .lua or .zip file here, or click to browse.</div>
+                <div id="import-dropzone" style="
+                    border: 2px dashed ${NOVA.border};
+                    border-radius: 16px;
+                    padding: 40px 20px;
+                    text-align: center;
+                    background: rgba(168,85,247,0.05);
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                    margin-bottom: 16px;
+                ">
+                    <i class="fa-solid fa-cloud-arrow-up" style="font-size: 36px; color: ${NOVA.accentLight}; margin-bottom: 12px;"></i>
+                    <div style="font-size: 15px; font-weight: 600; color: ${NOVA.text};">Choose a file or drag it here</div>
+                    <div style="font-size: 12px; color: ${NOVA.textSecondary}; margin-top: 6px;">.lua or .zip files only</div>
+                    <input type="file" id="import-file-input" accept=".lua,.zip" style="display: none;" />
+                </div>
+                <div id="import-status" style="display: none; margin-top: 16px;"></div>
+                <a href="#" id="import-cancel-btn" class="pn-btn" style="width: 100%; margin-top: 8px;"><i class="fa-solid fa-xmark"></i>&nbsp;Cancel</a>
+            `;
+
+            const dropzone = body.querySelector('#import-dropzone');
+            const fileInput = body.querySelector('#import-file-input');
+            const statusDiv = body.querySelector('#import-status');
+            const cancelBtn = body.querySelector('#import-cancel-btn');
+
+            // Click to browse
+            dropzone.addEventListener('click', () => fileInput.click());
+
+            // Drag & drop events
+            dropzone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropzone.style.borderColor = NOVA.accent;
+                dropzone.style.background = `rgba(168,85,247,0.12)`;
+            });
+            dropzone.addEventListener('dragleave', () => {
+                dropzone.style.borderColor = NOVA.border;
+                dropzone.style.background = `rgba(168,85,247,0.05)`;
+            });
+            dropzone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropzone.style.borderColor = NOVA.border;
+                dropzone.style.background = `rgba(168,85,247,0.05)`;
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    handleFile(files[0]);
+                }
+            });
+
+            fileInput.addEventListener('change', () => {
+                if (fileInput.files.length > 0) {
+                    handleFile(fileInput.files[0]);
+                }
+            });
+
+            cancelBtn.onclick = (e) => {
+                e.preventDefault();
+                overlay.remove();
+                if (backFn) backFn();
+            };
+
+            function handleFile(file) {
+                // Validate extension
+                const name = file.name.toLowerCase();
+                if (!name.endsWith('.lua') && !name.endsWith('.zip')) {
+                    statusDiv.style.display = 'block';
+                    statusDiv.innerHTML = `<div class="pn-error-box"><i class="fa-solid fa-circle-xmark"></i>&nbsp;Invalid file type. Only .lua or .zip files are accepted.</div>`;
+                    return;
+                }
+
+                // Show loading
+                statusDiv.style.display = 'block';
+                statusDiv.innerHTML = `<div style="text-align:center;padding:16px;"><i class="fa-solid fa-spinner fa-spin" style="color:${NOVA.accent};"></i><br><span style="color:${NOVA.textSecondary};">Processing ${file.name}...</span></div>`;
+                dropzone.style.pointerEvents = 'none';
+                dropzone.style.opacity = '0.6';
+
+                // Read file as base64
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const base64 = e.target.result.split(',')[1]; // Remove data:... prefix
+                    Millennium.callServerMethod('projectnova', 'ImportGameFile', {
+                        content: base64,
+                        filename: file.name
+                    }).then(res => {
+                        const p = typeof res === 'string' ? JSON.parse(res) : res;
+                        if (p?.success) {
+                            statusDiv.innerHTML = `<div class="pn-success-box"><i class="fa-solid fa-circle-check"></i>&nbsp;Successfully imported: ${p.name || 'App ID ' + p.appid}</div>`;
+                            showToast(`Game "${p.name || p.appid}" added to your library!`, 'success');
+                            
+                            // Change cancel button to "Close" and keep modal open
+                            cancelBtn.innerHTML = '<i class="fa-solid fa-check"></i>&nbsp;Close';
+                            cancelBtn.classList.remove('pn-btn');
+                            cancelBtn.classList.add('pn-btn', 'primary');
+                            
+                            // Re-enable dropzone in case user wants to import another file
+                            dropzone.style.pointerEvents = '';
+                            dropzone.style.opacity = '1';
+                            fileInput.value = ''; // Allow re-uploading the same file if needed
+                        } else {
+                            statusDiv.innerHTML = `<div class="pn-error-box"><i class="fa-solid fa-circle-xmark"></i>&nbsp;Import failed: ${p?.error || 'Unknown error'}</div>`;
+                            dropzone.style.pointerEvents = '';
+                            dropzone.style.opacity = '1';
+                        }
+                    }).catch(err => {
+                        statusDiv.innerHTML = `<div class="pn-error-box"><i class="fa-solid fa-circle-xmark"></i>&nbsp;Import error: ${err}</div>`;
+                        dropzone.style.pointerEvents = '';
+                        dropzone.style.opacity = '1';
+                    });
+                };
+                reader.readAsDataURL(file);
+            }
+        }, null, { backAction: backFn });
+    }
+
     // ========================== Add by App ID ==========================
     function showAddByAppIdPopup(backFn) {
         const currentAppId = getCurrentAppId();
@@ -1189,7 +1362,6 @@ function generateThemeStyles() {
                         preview.style.display = 'block';
                         const card = document.createElement('div');
                         card.className = 'pn-game-preview-card';
-                        // Task 3: Bigger game image, object-fit contain
                         const imgEl = makeGameThumb(val, 120, 68, 10);
                         const infoDiv = document.createElement('div');
                         infoDiv.innerHTML = `<div style="font-weight:700;font-size:16px;color:${NOVA.text};">${name}</div><div style="font-size:12px;color:${NOVA.textSecondary};margin-top:3px;">App ID: ${val}</div>`;
@@ -1198,7 +1370,6 @@ function generateThemeStyles() {
                         preview.innerHTML = '';
                         preview.appendChild(card);
                         actionArea.style.display = 'block';
-                        // Task 18: Renamed button
                         actionArea.innerHTML = `<a href="#" id="confirm-add-btn" class="pn-btn primary" style="width:100%;padding:14px 20px;font-size:15px;"><i class="fa-solid fa-rocket"></i>&nbsp;Add to your library</a>`;
                         body.querySelector('#confirm-add-btn').onclick = (e2) => {
                             e2.preventDefault();
@@ -1254,10 +1425,9 @@ function generateThemeStyles() {
 
     // ========================== Download Popup ==========================
     function showDownloadPopupForAppId(appid) {
-        createModal('Adding game to your library', (body, overlay) => {
+        createModal('Adding Game — Project Nova', (body, overlay) => {
             body.style.textAlign = 'left';
 
-            // Task 3: bigger thumbnail, object-fit contain
             const gameImgWrap = document.createElement('div');
             gameImgWrap.style.cssText = 'display:flex;align-items:center;gap:16px;margin-bottom:18px;';
             const gameImg = makeGameThumb(appid, 120, 68, 10);
@@ -1380,7 +1550,6 @@ function generateThemeStyles() {
                             progressBar.style.width = '100%';
                             statusMsg.innerHTML = '<i class="fa-solid fa-circle-check" style="color:#5cb85c;margin-right:6px;"></i>Game added to your library!';
                             cancelBtn.style.display = 'none';
-                            // Task 19: Do NOT auto-close — only change button text
                             hideBtn.innerHTML = '<i class="fa-solid fa-check"></i>&nbsp;Close';
                             runState.inProgress = false;
                             const addedBtn = document.querySelector('.projectnova-button');
@@ -1457,7 +1626,6 @@ function generateThemeStyles() {
 
     // ========================== Installed Games ==========================
     function showInstalledGamesPopup(backFn) {
-        // Task 11: Title is "Manage Installed Games"
         createModal('Manage Installed Games', (body, overlay) => {
             body.innerHTML = `<div style="text-align:center;padding:40px;"><i class="fa-solid fa-spinner" style="font-size:22px;color:${NOVA.accent};animation:pnSpinner 0.8s linear infinite;"></i><br><br>Loading your games…</div>`;
             Millennium.callServerMethod('projectnova', 'GetInstalledLuaScripts', {})
@@ -1476,7 +1644,6 @@ function generateThemeStyles() {
                     searchIcon.className = 'fa-solid fa-magnifying-glass pn-search-icon';
                     const searchInput = document.createElement('input');
                     searchInput.className = 'pn-search';
-                    // Task 12: Placeholder hints search by name or App ID
                     searchInput.placeholder = 'Search by game name or App ID…';
                     searchWrap.appendChild(searchIcon);
                     searchWrap.appendChild(searchInput);
@@ -1492,11 +1659,9 @@ function generateThemeStyles() {
                     p.scripts.forEach(script => {
                         const item = document.createElement('div');
                         item.className = 'pn-game-item';
-                        // Task 12: Store both name and appid for search
                         item.dataset.name  = (script.gameName || '').toLowerCase();
                         item.dataset.appid = String(script.appid);
 
-                        // Task 3 & 5: Bigger thumbnail, object-fit contain, full fallback chain
                         const iconWrap = document.createElement('div');
                         const iconImg = makeGameThumb(script.appid, 100, 60, 8);
                         iconWrap.appendChild(iconImg);
@@ -1581,7 +1746,6 @@ function generateThemeStyles() {
                     });
                     body.appendChild(list);
 
-                    // Task 12: Search by both game name and App ID
                     searchInput.addEventListener('input', () => {
                         const q = searchInput.value.trim().toLowerCase();
                         gameItems.forEach(item => {
@@ -1649,144 +1813,200 @@ function generateThemeStyles() {
 
     // ========================== Fixes Menu ==========================
     function showFixesLoadingPopupAndCheck(appid, backFn) {
-        const bgCandidates = getGameBgFallbacks(appid);
+        const primaryBg = getCDNUrl(appid, 'page_bg_generated_v6b.jpg');
         createModal('Checking Fixes…', (body, overlay) => {
             body.innerHTML = `<div style="text-align:center;padding:30px;"><i class="fa-solid fa-spinner" style="font-size:22px;color:${NOVA.accent};animation:pnSpinner 0.8s linear infinite;"></i><br><br><span style="color:${NOVA.textSecondary};">Looking for available fixes for this game…</span></div>`;
             fetchFixes(appid).then(payload => {
                 if (payload?.success) { overlay.remove(); showFixesResultsPopup(payload, window.__PROJECTNOVA_GAME_IS_INSTALLED__ === true, backFn); }
                 else { overlay.remove(); ShowProjectNovaAlert('No Fixes Found', payload?.error || 'No fixes were found for this game, or the game is not in the database yet.'); }
             }).catch(() => { overlay.remove(); ShowProjectNovaAlert('Connection Error', 'Could not check for fixes. Please make sure you are connected to the internet and try again.'); });
-        }, null, { backAction: backFn, bgImage: bgCandidates[0] });
+        }, null, { backAction: backFn, bgImage: primaryBg });
     }
 
-    // Task 4 & 6: Fixes results with rich, distinct game images
     function showFixesResultsPopup(data, isGameInstalled, backFn) {
-        const bgUrl = getCDNUrl(data.appid, 'library_hero.jpg');
-        createModal('Game Fixer', (body, overlay) => {
-            body.style.textAlign = 'left';
-
-            // Task 4 & 6: Large banner (header.jpg), then smaller thumbnail + info side by side
-            const gameHeader = document.createElement('div');
-            gameHeader.style.cssText = 'margin-bottom:20px;';
-
-            // Full-width banner — Task 6: uses header.jpg (distinct from icon)
-            const bannerFallbacks = getGameBannerFallbacks(data.appid).slice(1); // skip header, already primary
-            const banner = makeImgWithFallback(
-                getCDNUrl(data.appid, 'header.jpg'),
-                'width:100%;height:140px;object-fit:cover;border-radius:14px;margin-bottom:14px;display:block;',
-                bannerFallbacks
-            );
-            gameHeader.appendChild(banner);
-
-            // Thumbnail + title row (Task 3: object-fit contain, bigger)
-            const infoRow = document.createElement('div');
-            infoRow.style.cssText = 'display:flex;align-items:center;gap:16px;';
-            // Task 6: use capsule_sm_120 for icon (different from banner's header.jpg)
-            const icon = makeImgWithFallback(
-                getCDNUrl(data.appid, 'capsule_sm_120.jpg'),
-                'width:120px;height:68px;border-radius:10px;object-fit:contain;background:#0a0a1a;border:1px solid rgba(168,85,247,0.25);flex-shrink:0;',
-                [getCDNUrl(data.appid, 'capsule_231x87.jpg'), getCDNUrl(data.appid, 'header.jpg')]
-            );
-            const titleDiv = document.createElement('div');
-            titleDiv.innerHTML = `<div style="font-weight:700;font-size:18px;color:${NOVA.text};">${data.gameName || 'Unknown Game'}</div><div style="font-size:12px;color:${NOVA.textSecondary};margin-top:4px;">App ID: ${data.appid}</div>`;
-            infoRow.appendChild(icon);
-            infoRow.appendChild(titleDiv);
-            gameHeader.appendChild(infoRow);
-            body.appendChild(gameHeader);
-
-            if (!isGameInstalled) {
-                const warn = document.createElement('div');
-                warn.className = 'pn-warn-box';
-                // Task 2: Updated "not installed" text
-                warn.innerHTML = '<i class="fa-solid fa-triangle-exclamation" style="margin-right:8px;"></i>Game not installed! Make sure you have added it to your library and installed it.';
-                body.appendChild(warn);
-            }
-
-            const columns = document.createElement('div');
-            columns.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:16px;';
-
-            function makeFixButton(label, text, icon, isAvailable, onClick) {
-                const wrapper = document.createElement('div');
-                const lbl = document.createElement('div');
-                lbl.style.cssText = `font-size:10.5px;text-transform:uppercase;letter-spacing:0.09em;font-weight:700;color:${NOVA.accent};margin-bottom:8px;`;
-                lbl.textContent = label;
-                const btn = document.createElement('a');
-                btn.href = '#';
-                btn.className = 'pn-btn';
-                btn.style.cssText = 'width:100%;justify-content:center;';
-                if (!isAvailable) {
-                    btn.style.opacity = '0.42';
-                    btn.style.pointerEvents = 'none';
-                    btn.title = 'Not available — game not installed or fix not found';
+        const overlay = createModal(
+            'Game Fixer',
+            (body, modalOverlay) => {
+                body.style.textAlign = 'left';
+                body.style.padding = '0';
+                
+                // ===== Background Box with Border =====
+                const bgBox = document.createElement('div');
+                bgBox.style.cssText = `
+                    position: relative;
+                    border-radius: 18px;
+                    padding: 20px 18px;
+                    margin-bottom: 16px;
+                    background-size: cover;
+                    background-position: center;
+                    background-repeat: no-repeat;
+                    border: 2px solid rgba(168,85,247,0.5);
+                    box-shadow: inset 0 0 0 1000px rgba(13,13,34,0.55);
+                    overflow: hidden;
+                `;
+                
+                // Content inside the background box
+                const boxContent = document.createElement('div');
+                boxContent.style.cssText = 'position: relative; z-index: 2;';
+                
+                // Game info row (icon + name + appid)
+                const infoRow = document.createElement('div');
+                infoRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:20px;';
+                const icon = makeGameThumb(data.appid, 120, 68, 8);
+                infoRow.appendChild(icon);
+                const titleDiv = document.createElement('div');
+                titleDiv.innerHTML = `<div style="font-weight:700;font-size:18px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.7);">${data.gameName || 'Unknown Game'}</div><div style="font-size:13px;color:#eee;text-shadow:0 1px 4px rgba(0,0,0,0.6);">App ID: ${data.appid}</div>`;
+                infoRow.appendChild(titleDiv);
+                boxContent.appendChild(infoRow);
+                
+                // Not installed warning
+                if (!isGameInstalled) {
+                    const warn = document.createElement('div');
+                    warn.className = 'pn-warn-box';
+                    warn.style.cssText = 'margin-bottom:16px;background:rgba(255,193,7,0.2);backdrop-filter:blur(4px);';
+                    warn.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>&nbsp;Game not installed! Make sure you have added it to your library and installed it.';
+                    boxContent.appendChild(warn);
                 }
-                btn.innerHTML = `<i class="fa-solid ${icon}"></i><span>${text}</span>`;
-                btn.onclick = (e) => { e.preventDefault(); if (isAvailable) onClick(); };
-                wrapper.appendChild(lbl);
-                wrapper.appendChild(btn);
-                return wrapper;
-            }
-
-            const leftCol  = document.createElement('div');
-            const rightCol = document.createElement('div');
-
-            const genericStatus = data.genericFix.status;
-            leftCol.appendChild(makeFixButton('Generic Fix',
-                genericStatus === 200 ? 'Apply Generic Fix' : 'No generic fix available',
-                genericStatus === 200 ? 'fa-check-circle' : 'fa-circle-xmark',
-                genericStatus === 200 && isGameInstalled,
-                () => { if (genericStatus === 200 && isGameInstalled) applyFix(data.appid, `https://files.luatools.work/GameBypasses/${data.appid}.zip`, 'Generic Fix', data.gameName, overlay, backFn); }
-            ));
-
-            const onlineStatus = data.onlineFix.status;
-            leftCol.appendChild(makeFixButton('Online Fix',
-                onlineStatus === 200 ? 'Apply Online Fix' : 'No online fix available',
-                onlineStatus === 200 ? 'fa-check-circle' : 'fa-circle-xmark',
-                onlineStatus === 200 && isGameInstalled,
-                () => { if (onlineStatus === 200 && isGameInstalled) applyFix(data.appid, data.onlineFix.url || `https://files.luatools.work/OnlineFix1/${data.appid}.zip`, 'Online Fix', data.gameName, overlay, backFn); }
-            ));
-
-            rightCol.appendChild(makeFixButton('All-In-One Fixes',
-                'Online Fix (Unsteam)',
-                'fa-globe',
-                isGameInstalled,
-                () => { if (isGameInstalled) applyFix(data.appid, 'https://github.com/madoiscool/lt_api_links/releases/download/unsteam/Win64.zip', 'Online Fix (Unsteam)', data.gameName, overlay, backFn); }
-            ));
-
-            rightCol.appendChild(makeFixButton('Manage Game',
-                'Un-Fix (Restore Original Files)',
-                'fa-rotate',
-                isGameInstalled,
-                () => {
+                
+                // Fix buttons grid
+                const columns = document.createElement('div');
+                columns.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:16px;';
+                
+                function makeFixButton(label, text, icon, isAvailable, onClick) {
+                    const wrapper = document.createElement('div');
+                    const lbl = document.createElement('div');
+                    lbl.style.cssText = 'font-size:11px;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;color:#e0b0ff;margin-bottom:8px;text-shadow:0 1px 4px rgba(0,0,0,0.5);';
+                    lbl.textContent = label;
+                    const btn = document.createElement('a');
+                    btn.href = '#';
+                    btn.className = 'pn-btn';
+                    btn.style.cssText = `
+                        width: 100%;
+                        justify-content: center;
+                        background: rgba(20, 20, 40, 0.85);
+                        backdrop-filter: blur(4px);
+                        border: 1px solid rgba(168,85,247,0.5);
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                        text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+                        font-weight: 600;
+                    `;
+                    if (!isAvailable) {
+                        btn.style.opacity = '0.5';
+                        btn.style.pointerEvents = 'none';
+                    }
+                    btn.innerHTML = `<i class="fa-solid ${icon}"></i><span>${text}</span>`;
+                    btn.onclick = (e) => { e.preventDefault(); if (isAvailable) onClick(); };
+                    wrapper.appendChild(lbl);
+                    wrapper.appendChild(btn);
+                    return wrapper;
+                }
+                
+                const leftCol = document.createElement('div');
+                const rightCol = document.createElement('div');
+                
+                const genericStatus = data.genericFix.status;
+                leftCol.appendChild(makeFixButton('Generic Fix', genericStatus === 200 ? 'Apply Generic Fix' : 'No generic fix', genericStatus === 200 ? 'fa-check-circle' : 'fa-circle-xmark', genericStatus === 200 && isGameInstalled, () => {
+                    if (genericStatus === 200 && isGameInstalled) applyFix(data.appid, `https://files.luatools.work/GameBypasses/${data.appid}.zip`, 'Generic Fix', data.gameName, overlay, backFn);
+                }));
+                
+                const onlineStatus = data.onlineFix.status;
+                leftCol.appendChild(makeFixButton('Online Fix', onlineStatus === 200 ? 'Apply Online Fix' : 'No online-fix', onlineStatus === 200 ? 'fa-check-circle' : 'fa-circle-xmark', onlineStatus === 200 && isGameInstalled, () => {
+                    if (onlineStatus === 200 && isGameInstalled) applyFix(data.appid, data.onlineFix.url || `https://files.luatools.work/OnlineFix1/${data.appid}.zip`, 'Online Fix', data.gameName, overlay, backFn);
+                }));
+                
+                rightCol.appendChild(makeFixButton('All-In-One Fixes', 'Online Fix (Unsteam)', 'fa-globe', isGameInstalled, () => {
+                    if (isGameInstalled) applyFix(data.appid, 'https://github.com/madoiscool/lt_api_links/releases/download/unsteam/Win64.zip', 'Online Fix (Unsteam)', data.gameName, overlay, backFn);
+                }));
+                
+                rightCol.appendChild(makeFixButton('Manage Game', 'Un-Fix (verify game)', 'fa-rotate', isGameInstalled, () => {
                     if (isGameInstalled) {
                         overlay.remove();
-                        showProjectNovaConfirm('Project Nova',
-                            'This will remove the fix files and run Steam\'s file verification to restore the original game files. Are you sure you want to continue?',
-                            () => startUnfix(data.appid, backFn),
-                            () => showFixesResultsPopup(data, isGameInstalled, backFn)
-                        );
+                        showProjectNovaConfirm('Project Nova', 'Are you sure you want to un-fix? This will remove fix files and verify game files.', () => startUnfix(data.appid, backFn), () => showFixesResultsPopup(data, isGameInstalled, backFn));
                     }
-                }
-            ));
-
-            columns.appendChild(leftCol);
-            columns.appendChild(rightCol);
-            body.appendChild(columns);
-
-            const folderBtn = document.createElement('a');
-            folderBtn.href = '#';
-            folderBtn.className = 'pn-btn';
-            folderBtn.style.cssText = 'margin-top:18px;width:100%;justify-content:center;';
-            folderBtn.innerHTML = '<i class="fa-solid fa-folder-open"></i>&nbsp;Open Game Folder';
-            folderBtn.onclick = (e) => {
-                e.preventDefault();
-                if (window.__PROJECTNOVA_GAME_INSTALL_PATH__) {
-                    Millennium.callServerMethod('projectnova', 'OpenGameFolder', { path: window.__PROJECTNOVA_GAME_INSTALL_PATH__ });
+                }));
+                
+                columns.appendChild(leftCol);
+                columns.appendChild(rightCol);
+                boxContent.appendChild(columns);
+                
+                bgBox.appendChild(boxContent);
+                body.appendChild(bgBox);
+                
+                // ===== Conditional Buttons: Open Game Folder (if installed) or Go to Game Page =====
+                const btnContainer = document.createElement('div');
+                btnContainer.style.cssText = 'display:flex;gap:12px;margin-top:16px;';
+                
+                if (isGameInstalled && window.__PROJECTNOVA_GAME_INSTALL_PATH__) {
+                    const folderBtn = document.createElement('a');
+                    folderBtn.href = '#';
+                    folderBtn.className = 'pn-btn';
+                    folderBtn.style.cssText = 'flex:1;padding:12px 20px;justify-content:center;';
+                    folderBtn.innerHTML = '<i class="fa-solid fa-folder-open"></i>&nbsp;Open Game Folder';
+                    folderBtn.onclick = (e) => {
+                        e.preventDefault();
+                        Millennium.callServerMethod('projectnova', 'OpenGameFolder', { path: window.__PROJECTNOVA_GAME_INSTALL_PATH__ });
+                    };
+                    btnContainer.appendChild(folderBtn);
                 } else {
-                    ShowProjectNovaAlert('Cannot Open Folder', 'The game folder path is not available. The game may not be installed.');
+                    const storeBtn = document.createElement('a');
+                    storeBtn.href = '#';
+                    storeBtn.className = 'pn-btn primary';
+                    storeBtn.style.cssText = 'flex:1;padding:12px 20px;justify-content:center;';
+                    storeBtn.innerHTML = '<i class="fa-solid fa-arrow-up-right-from-square"></i>&nbsp;Go to Game Page';
+                    storeBtn.onclick = (e) => {
+                        e.preventDefault();
+                        openUrl(`https://store.steampowered.com/app/${data.appid}`);
+                    };
+                    btnContainer.appendChild(storeBtn);
                 }
-            };
-            body.appendChild(folderBtn);
-        }, null, { backAction: backFn, bgImage: bgUrl });
+                
+                const secondaryBtn = document.createElement('a');
+                secondaryBtn.href = '#';
+                secondaryBtn.className = 'pn-btn';
+                secondaryBtn.style.cssText = 'flex:1;padding:12px 20px;justify-content:center;';
+                if (isGameInstalled) {
+                    secondaryBtn.innerHTML = '<i class="fa-solid fa-store"></i>&nbsp;Go to Game Page';
+                    secondaryBtn.onclick = (e) => {
+                        e.preventDefault();
+                        openUrl(`https://store.steampowered.com/app/${data.appid}`);
+                    };
+                } else {
+                    secondaryBtn.innerHTML = '<i class="fa-solid fa-folder-open"></i>&nbsp;Open Game Folder';
+                    secondaryBtn.style.opacity = '0.5';
+                    secondaryBtn.style.pointerEvents = 'none';
+                    secondaryBtn.title = 'Game is not installed';
+                }
+                btnContainer.appendChild(secondaryBtn);
+                
+                body.appendChild(btnContainer);
+                
+                // Apply background to the bgBox with robust fallback (like banner)
+                getBestBackgroundUrl(data.appid).then(bgUrl => {
+                    if (bgUrl) {
+                        const img = new Image();
+                        img.onload = () => {
+                            bgBox.style.backgroundImage = `url('${bgUrl}')`;
+                        };
+                        img.onerror = () => {
+                            bgBox.style.backgroundImage = `linear-gradient(145deg, #1a1a3e, #0f0f2a)`;
+                        };
+                        img.src = bgUrl;
+                    } else {
+                        bgBox.style.backgroundImage = `linear-gradient(145deg, #1a1a3e, #0f0f2a)`;
+                    }
+                });
+            },
+            null,
+            { backAction: backFn }
+        );
+        
+        // Make this modal wider (700px) – only for Game Fixer
+        const modalElement = overlay.querySelector('.pn-modal');
+        if (modalElement) {
+            modalElement.style.width = '700px';
+        }
+        
+        return overlay;
     }
 
     function applyFix(appid, downloadUrl, fixType, gameName, resultsOverlay, backFn) {
@@ -1904,7 +2124,7 @@ function generateThemeStyles() {
         }, null, { backAction: backFn, bgImage: bgUrl });
     }
 
-    // ========================== Settings (Tasks 9 section titles) ==========================
+    // ========================== Settings Manager ==========================
     function showSettingsManagerPopup(backFn) {
         createModal('Settings', (body, overlay) => {
             body.innerHTML = `<div style="text-align:center;padding:40px;"><i class="fa-solid fa-spinner" style="font-size:22px;color:${NOVA.accent};animation:pnSpinner 0.8s linear infinite;"></i></div>`;
@@ -2115,7 +2335,6 @@ function generateThemeStyles() {
             const currentId = getCurrentAppId();
             if (currentId) appidInput.value = currentId;
 
-            // Task 15 & 18: API hint shown as proper box with buttons, not inline text
             function updateHint() {
                 const mode = modeSelect.value;
                 if (mode === 'github+morrenus' || mode === 'github+manifesthub') {
@@ -2180,7 +2399,6 @@ function generateThemeStyles() {
                     progressDiv.style.display = 'block';
                     statusMsgDiv.textContent = 'Starting update, please wait…';
 
-                    // Task 21: Pass hideWindow to suppress terminal window
                     Millennium.callServerMethod('projectnova', 'run_manifest_updater_interactive', {
                         appid, mode, morrenusKey, manifesthubKey, hideWindow: true
                     }).then(res => {
@@ -2246,7 +2464,7 @@ function generateThemeStyles() {
         }, null, { backAction: backFn });
     }
 
-    // ========================== FAQ (Task 17) ==========================
+    // ========================== FAQ ==========================
     function showFAQModal(backFn) {
         createModal('Frequently Asked Questions', (body) => {
             body.style.textAlign = 'left';
@@ -2323,7 +2541,7 @@ function generateThemeStyles() {
             if (apps?.length) {
                 const intro = document.createElement('div');
                 intro.className = 'pn-info-box';
-                intro.innerHTML = `<i class="fa-solid fa-circle-check" style="color:#5cb85c;margin-right:8px;"></i>The following games have been added to your Steam library. Click a game to install it. <span style="opacity:0.7;">(Right-click to open on SteamDB)</span>`;
+                intro.innerHTML = `<i class="fa-solid fa-circle-check" style="color:#5cb85c;margin-right:8px;"></i>The following games have been added to your Steam library. Click a game to install it.`;
                 body.appendChild(intro);
                 apps.forEach(item => {
                     const a = document.createElement('div');
@@ -2409,7 +2627,6 @@ function generateThemeStyles() {
             : (targetContainer.querySelector('a') || targetContainer.querySelector('button'));
         const steamBtnClass = (referenceBtn && referenceBtn.className) ? referenceBtn.className : 'btnv6_blue_hoverfade btn_medium';
 
-        // Restart Steam button
         if (window.location.pathname.includes('/app/') && !document.querySelector('.projectnova-restart-button') && !window.__PROJECTNOVA_RESTART_INSERTED__) {
             const restartBtn = document.createElement('a');
             restartBtn.className = steamBtnClass + ' projectnova-restart-button';
@@ -2433,7 +2650,6 @@ function generateThemeStyles() {
                 .catch(() => insertAddButton());
         }
 
-        // Task 18: Button text renamed to "Remove from your library"
         function insertRemoveButton() {
             if (document.querySelector('.projectnova-remove-button') || document.querySelector('.projectnova-button')) return;
             const removeBtn = document.createElement('a');
@@ -2462,7 +2678,6 @@ function generateThemeStyles() {
             window.__PROJECTNOVA_REMOVE_INSERTED__ = true;
         }
 
-        // Task 18: Button text renamed to "Add to your library"
         function insertAddButton() {
             if (document.querySelector('.projectnova-button') || document.querySelector('.projectnova-remove-button')) return;
             const addBtn = document.createElement('a');
@@ -2499,7 +2714,6 @@ function generateThemeStyles() {
         }
     }
 
-    // Task 18: Updated button text strings
     function updateButtonTranslations() {
         document.querySelectorAll('.projectnova-restart-button span').forEach(s => s.textContent = 'Restart Steam');
         document.querySelectorAll('.projectnova-button span').forEach(s => s.textContent = 'Add to your library');
@@ -2552,7 +2766,6 @@ function generateThemeStyles() {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onFrontendReady);
     else onFrontendReady();
 
-    // ========================== Add Button Click Delegate ==========================
     document.addEventListener('click', (evt) => {
         const anchor = evt.target.closest('.projectnova-button');
         if (!anchor) return;
@@ -2617,7 +2830,6 @@ function generateThemeStyles() {
             .catch(() => continueWithAdd());
     });
 
-    // ========================== URL Change Detection ==========================
     let lastUrl = window.location.href;
     setInterval(() => {
         if (window.location.href !== lastUrl) {
