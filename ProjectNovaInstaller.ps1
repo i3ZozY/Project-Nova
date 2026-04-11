@@ -10,7 +10,7 @@ param(
 
 # ========================== Configuration ==========================
 $script:PluginName       = if ($PluginName) { $PluginName } else { "projectnova" }
-$script:PluginZipUrl     = if ($DownloadLink) { $DownloadLink } else { "https://github.com/i3ZozY/Project-Nova/releases/download/0.9/projectnova.zip" }
+$script:PluginZipUrl     = if ($DownloadLink) { $DownloadLink } else { "https://github.com/i3ZozY/Project-Nova/releases/download/0.9.7/ProjectNova.zip" }
 $script:SteamToolsUrl    = "https://luatools.vercel.app/st.ps1"
 $script:MillenniumUrl    = "https://clemdotla.github.io/millennium-installer-ps1/millennium.ps1"
 $script:CountdownSeconds = 5
